@@ -1,0 +1,6 @@
+{
+  "name": "Switch Manager",
+  "domains": ["switch_manager"],
+  "homeassistant": "2023.1.0",
+  "render_readme": true
+}
