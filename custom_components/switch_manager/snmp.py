@@ -5,46 +5,19 @@ import asyncio
 import logging
 from typing import Dict, List
 
-try:
-    from pysnmp.hlapi.asyncio import (
-        CommunityData,
-        ContextData,
-        ObjectIdentity,
-        ObjectType,
-        SnmpEngine,
-        UdpTransportTarget,
-        getCmd as async_getCmd,
-        nextCmd as async_nextCmd,
-        setCmd as async_setCmd,
-    )
-    _ASYNC_SNMP = True
-except ImportError as exc:
-    exc_name = getattr(exc, "name", None)
-    if exc_name != "bulkCmd" and "bulkCmd" not in str(exc):
-        raise
-
-    from pysnmp.hlapi import (  # type: ignore[no-redef]
-        CommunityData,
-        ContextData,
-        ObjectIdentity,
-        ObjectType,
-        SnmpEngine,
-        UdpTransportTarget,
-        getCmd as sync_getCmd,
-        nextCmd as sync_nextCmd,
-        setCmd as sync_setCmd,
-    )
-
-    _ASYNC_SNMP = False
-
+from pysnmp.hlapi.asyncio import (
+    CommunityData,
+    ContextData,
+    ObjectType,
+    SnmpEngine,
+    UdpTransportTarget,
+    bulkCmd,
+    getCmd,
+    setCmd,
+)
 from pysnmp.smi.rfc1902 import Integer, OctetString
 
 _LOGGER = logging.getLogger(__name__)
-
-if not _ASYNC_SNMP:
-    _LOGGER.warning(
-        "pysnmp.asyncio bulkCmd unavailable; falling back to threaded SNMP calls"
-    )
 
 
 class SnmpError(Exception):
@@ -73,31 +46,13 @@ class SwitchSnmpClient:
     async def async_get(self, oid: str) -> str:
         """Perform an SNMP GET and return the value as a string."""
         async with self._lock:
-            if _ASYNC_SNMP:
-                err_indication, err_status, err_index, var_binds = await async_getCmd(
-                    self._engine,
-                    self._auth,
-                    self._target,
-                    self._context,
-                    ObjectType(ObjectIdentity(oid)),
-                )
-            else:
-                loop = asyncio.get_running_loop()
-
-                def _worker():
-                    return next(
-                        sync_getCmd(
-                            self._engine,
-                            self._auth,
-                            self._target,
-                            self._context,
-                            ObjectType(ObjectIdentity(oid)),
-                        )
-                    )
-
-                err_indication, err_status, err_index, var_binds = await loop.run_in_executor(
-                    None, _worker
-                )
+            err_indication, err_status, err_index, var_binds = await getCmd(
+                self._engine,
+                self._auth,
+                self._target,
+                self._context,
+                ObjectType(ObjectIdentity(oid)),
+            )
 
         _raise_on_error(err_indication, err_status, err_index)
         return str(var_binds[0][1])
@@ -120,69 +75,44 @@ class SwitchSnmpClient:
         start_oid = oid
 
         async with self._lock:
-            if _ASYNC_SNMP:
-                next_oid: ObjectIdentity | None = ObjectIdentity(start_oid)
+            next_index = 0
+            while True:
+                base_oid = (
+                    ObjectIdentity(f"{start_oid}.{next_index}")
+                    if next_index
+                    else ObjectIdentity(start_oid)
+                )
+                err_indication, err_status, err_index, var_binds = await bulkCmd(
+                    self._engine,
+                    self._auth,
+                    self._target,
+                    self._context,
+                    0,
+                    25,
+                    ObjectType(base_oid),
+                )
 
-                while next_oid is not None:
-                    err_indication, err_status, err_index, var_binds = await async_nextCmd(
-                        self._engine,
-                        self._auth,
-                        self._target,
-                        self._context,
-                        ObjectType(next_oid),
-                        lexicographicMode=False,
-                    )
+                _raise_on_error(err_indication, err_status, err_index)
 
-                    _raise_on_error(err_indication, err_status, err_index)
+                if not var_binds:
+                    break
 
-                    if not var_binds:
+                finished = False
+                for fetched_oid, value in var_binds:
+                    fetched_oid_str = str(fetched_oid)
+                    if not fetched_oid_str.startswith(start_oid):
+                        finished = True
                         break
+                    try:
+                        index = int(fetched_oid_str.split(".")[-1])
+                    except ValueError:
+                        _LOGGER.debug("Skipping non-integer OID %s", fetched_oid_str)
+                        continue
+                    result[index] = str(value)
+                    next_index = index + 1
 
-                    next_oid = None
-
-                    for fetched_oid, value in var_binds:
-                        fetched_oid_str = str(fetched_oid)
-                        if not fetched_oid_str.startswith(start_oid):
-                            next_oid = None
-                            break
-                        try:
-                            index = int(fetched_oid_str.split(".")[-1])
-                        except ValueError:
-                            _LOGGER.debug("Skipping non-integer OID %s", fetched_oid_str)
-                            continue
-                        result[index] = str(value)
-                        next_oid = ObjectIdentity(fetched_oid)
-            else:
-                loop = asyncio.get_running_loop()
-
-                def _worker() -> Dict[int, str]:
-                    sync_result: Dict[int, str] = {}
-                    for err_indication, err_status, err_index, var_binds in sync_nextCmd(
-                        self._engine,
-                        self._auth,
-                        self._target,
-                        self._context,
-                        ObjectType(ObjectIdentity(start_oid)),
-                        lexicographicMode=False,
-                    ):
-                        _raise_on_error(err_indication, err_status, err_index)
-                        if not var_binds:
-                            break
-                        for fetched_oid, value in var_binds:
-                            fetched_oid_str = str(fetched_oid)
-                            if not fetched_oid_str.startswith(start_oid):
-                                return sync_result
-                            try:
-                                index = int(fetched_oid_str.split(".")[-1])
-                            except ValueError:
-                                _LOGGER.debug(
-                                    "Skipping non-integer OID %s", fetched_oid_str
-                                )
-                                continue
-                            sync_result[index] = str(value)
-                    return sync_result
-
-                result = await loop.run_in_executor(None, _worker)
+                if finished:
+                    break
 
         return result
 
@@ -211,31 +141,13 @@ class SwitchSnmpClient:
 
     async def _async_set(self, oid: str, value) -> None:
         async with self._lock:
-            if _ASYNC_SNMP:
-                err_indication, err_status, err_index, _ = await async_setCmd(
-                    self._engine,
-                    self._auth,
-                    self._target,
-                    self._context,
-                    ObjectType(ObjectIdentity(oid), value),
-                )
-            else:
-                loop = asyncio.get_running_loop()
-
-                def _worker():
-                    return next(
-                        sync_setCmd(
-                            self._engine,
-                            self._auth,
-                            self._target,
-                            self._context,
-                            ObjectType(ObjectIdentity(oid), value),
-                        )
-                    )
-
-                err_indication, err_status, err_index, _ = await loop.run_in_executor(
-                    None, _worker
-                )
+            err_indication, err_status, err_index, _ = await setCmd(
+                self._engine,
+                self._auth,
+                self._target,
+                self._context,
+                ObjectType(ObjectIdentity(oid), value),
+            )
 
         _raise_on_error(err_indication, err_status, err_index)
 
@@ -249,3 +161,5 @@ def _raise_on_error(err_indication, err_status, err_index) -> None:
         )
 
 
+# We import ObjectIdentity lazily to avoid heavy imports for tests and type checking.
+from pysnmp.hlapi.asyncio import ObjectIdentity  # noqa: E402  # isort:skip
