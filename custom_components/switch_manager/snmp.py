@@ -5,19 +5,45 @@ import asyncio
 import logging
 from typing import Dict, List
 
-from pysnmp.hlapi import (
-    CommunityData,
-    ContextData,
-    ObjectIdentity,
-    ObjectType,
-    SnmpEngine,
-    UdpTransportTarget,
-    getCmd as sync_getCmd,
-    nextCmd as sync_nextCmd,
-    setCmd as sync_setCmd,
-)
+from importlib import import_module
 
-try:
+_LOGGER = logging.getLogger(__name__)
+
+_BASE_IMPORT_ERROR: Exception | None = None
+CommunityData = ContextData = ObjectIdentity = ObjectType = SnmpEngine = None  # type: ignore[assignment]
+UdpTransportTarget = None  # type: ignore[assignment]
+
+for _module_name in ("pysnmp.hlapi", "pysnmp.hlapi.asyncio"):
+    try:
+        _module = import_module(_module_name)
+        CommunityData = getattr(_module, "CommunityData")
+        ContextData = getattr(_module, "ContextData")
+        ObjectIdentity = getattr(_module, "ObjectIdentity")
+        ObjectType = getattr(_module, "ObjectType")
+        SnmpEngine = getattr(_module, "SnmpEngine")
+        UdpTransportTarget = getattr(_module, "UdpTransportTarget")
+        break
+    except (ImportError, AttributeError) as exc:  # pragma: no cover - import shim
+        _BASE_IMPORT_ERROR = exc
+else:  # pragma: no cover - import shim
+    raise ImportError(
+        "Unable to locate pysnmp CommunityData/ContextData helpers"
+    ) from _BASE_IMPORT_ERROR
+
+
+try:  # pragma: no cover - import shim
+    from pysnmp.hlapi import (
+        getCmd as sync_getCmd,
+        nextCmd as sync_nextCmd,
+        setCmd as sync_setCmd,
+    )
+    _SYNC_SNMP = True
+    _SYNC_IMPORT_ERROR: ImportError | None = None
+except ImportError as exc:  # pragma: no cover - import shim
+    _SYNC_SNMP = False
+    _SYNC_IMPORT_ERROR = exc
+
+try:  # pragma: no cover - import shim
     from pysnmp.hlapi.asyncio import (
         getCmd as async_getCmd,
         nextCmd as async_nextCmd,
@@ -25,15 +51,19 @@ try:
     )
     _ASYNC_SNMP = True
     _ASYNC_IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:
+except ImportError as exc:  # pragma: no cover - import shim
     _ASYNC_SNMP = False
     _ASYNC_IMPORT_ERROR = exc
 
 from pysnmp.smi.rfc1902 import Integer, OctetString
 
-_LOGGER = logging.getLogger(__name__)
-
 if not _ASYNC_SNMP:
+    if not _SYNC_SNMP:
+        missing = _ASYNC_IMPORT_ERROR or _SYNC_IMPORT_ERROR or _BASE_IMPORT_ERROR
+        raise ImportError(
+            "pysnmp getCmd helpers are unavailable in both asyncio and sync variants"
+        ) from missing
+
     missing_detail = ""
     if _ASYNC_IMPORT_ERROR is not None:
         missing_detail = f" ({_ASYNC_IMPORT_ERROR})"
