@@ -1,6 +1,6 @@
 # Home Assistant: Switch Manager
 
-Switch Manager is a Home Assistant custom integration and Lovelace card for discovering and managing network switches via SNMP. The integration can be distributed through [HACS](https://hacs.xyz/) for easy installation.
+Switch Manager is a Home Assistant custom integration and Lovelace card for discovering and managing network switches via SNMP. Install it through HACS to gain automatic port discovery, live status, and per-port controls directly from Home Assistant.
 
 ## Features
 
