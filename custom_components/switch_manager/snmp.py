@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from importlib import import_module
 import logging
-from typing import Any, Dict, List, Tuple
+from types import ModuleType
+from typing import Any, Dict, Iterable, List, Tuple
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,58 +44,129 @@ ASYNC_IMPORT_ERROR: Exception | None = None
 SYNC_IMPORT_ERROR: Exception | None = None
 INTEGER_IMPORT_ERROR: Exception | None = None
 
-try:  # pragma: no cover - import availability is environment dependent
-    from pysnmp.hlapi.asyncio import (
-        CommunityData as AsyncCommunityData,
-        ContextData as AsyncContextData,
-        ObjectIdentity as AsyncObjectIdentity,
-        ObjectType as AsyncObjectType,
-        SnmpEngine as AsyncSnmpEngine,
-        UdpTransportTarget as AsyncUdpTransportTarget,
-        getCmd as async_getCmd,
-        nextCmd as async_nextCmd,
-        setCmd as async_setCmd,
-    )
-    ASYNC_HELPERS_AVAILABLE = True
-except Exception as err:  # pragma: no cover - availability shim
-    ASYNC_HELPERS_AVAILABLE = False
-    ASYNC_IMPORT_ERROR = err
-    AsyncCommunityData = None
-    AsyncContextData = None
-    AsyncObjectIdentity = None
-    AsyncObjectType = None
-    AsyncSnmpEngine = None
-    AsyncUdpTransportTarget = None
-    async_getCmd = None
-    async_nextCmd = None
-    async_setCmd = None
+def _import_helper_module(
+    module_candidates: Iterable[str],
+    required_attributes: Tuple[str, ...],
+) -> Tuple[ModuleType | None, Exception | None]:
+    """Try importing helper modules, returning the first that satisfies requirements."""
+
+    last_error: Exception | None = None
+    for module_name in module_candidates:
+        try:
+            module = import_module(module_name)
+        except Exception as err:  # pragma: no cover - runtime environment dependent
+            last_error = err
+            continue
+
+        missing = [attr for attr in required_attributes if not hasattr(module, attr)]
+        if missing:
+            last_error = AttributeError(
+                f"{module_name} missing attributes: {', '.join(missing)}"
+            )
+            continue
+
+        return module, None
+
+    return None, last_error
 
 
-try:  # pragma: no cover - import availability is environment dependent
-    from pysnmp.hlapi import (
-        CommunityData as SyncCommunityData,
-        ContextData as SyncContextData,
-        ObjectIdentity as SyncObjectIdentity,
-        ObjectType as SyncObjectType,
-        SnmpEngine as SyncSnmpEngine,
-        UdpTransportTarget as SyncUdpTransportTarget,
-        getCmd as sync_getCmd,
-        nextCmd as sync_nextCmd,
-        setCmd as sync_setCmd,
-    )
-    SYNC_HELPERS_AVAILABLE = True
-except Exception as err:  # pragma: no cover - availability shim
-    SYNC_HELPERS_AVAILABLE = False
-    SYNC_IMPORT_ERROR = err
-    SyncCommunityData = None
-    SyncContextData = None
-    SyncObjectIdentity = None
-    SyncObjectType = None
-    SyncSnmpEngine = None
-    SyncUdpTransportTarget = None
-    sync_getCmd = None
-    sync_nextCmd = None
-    sync_setCmd = None
+def _extract_attributes(module: ModuleType | None, names: Tuple[str, ...]) -> Dict[str, Any]:
+    """Return attribute mapping from module or a dict of None when unavailable."""
+
+    if module is None:
+        return {name: None for name in names}
+
+    return {name: getattr(module, name) for name in names}
+
+
+ASYNC_MODULE, ASYNC_IMPORT_ERROR = _import_helper_module(
+    (
+        "pysnmp.hlapi.asyncio",
+        "pysnmp.hlapi.v1arch.asyncio",
+    ),
+    (
+        "CommunityData",
+        "ContextData",
+        "ObjectIdentity",
+        "ObjectType",
+        "SnmpEngine",
+        "UdpTransportTarget",
+        "getCmd",
+        "nextCmd",
+        "setCmd",
+    ),
+)
+
+ASYNC_ATTRS = _extract_attributes(
+    ASYNC_MODULE,
+    (
+        "CommunityData",
+        "ContextData",
+        "ObjectIdentity",
+        "ObjectType",
+        "SnmpEngine",
+        "UdpTransportTarget",
+        "getCmd",
+        "nextCmd",
+        "setCmd",
+    ),
+)
+
+AsyncCommunityData = ASYNC_ATTRS["CommunityData"]
+AsyncContextData = ASYNC_ATTRS["ContextData"]
+AsyncObjectIdentity = ASYNC_ATTRS["ObjectIdentity"]
+AsyncObjectType = ASYNC_ATTRS["ObjectType"]
+AsyncSnmpEngine = ASYNC_ATTRS["SnmpEngine"]
+AsyncUdpTransportTarget = ASYNC_ATTRS["UdpTransportTarget"]
+async_getCmd = ASYNC_ATTRS["getCmd"]
+async_nextCmd = ASYNC_ATTRS["nextCmd"]
+async_setCmd = ASYNC_ATTRS["setCmd"]
+ASYNC_HELPERS_AVAILABLE = ASYNC_MODULE is not None
+
+
+SYNC_MODULE, SYNC_IMPORT_ERROR = _import_helper_module(
+    (
+        "pysnmp.hlapi",
+        "pysnmp.hlapi.v1arch",
+    ),
+    (
+        "CommunityData",
+        "ContextData",
+        "ObjectIdentity",
+        "ObjectType",
+        "SnmpEngine",
+        "UdpTransportTarget",
+        "getCmd",
+        "nextCmd",
+        "setCmd",
+    ),
+)
+
+SYNC_ATTRS = _extract_attributes(
+    SYNC_MODULE,
+    (
+        "CommunityData",
+        "ContextData",
+        "ObjectIdentity",
+        "ObjectType",
+        "SnmpEngine",
+        "UdpTransportTarget",
+        "getCmd",
+        "nextCmd",
+        "setCmd",
+    ),
+)
+
+SyncCommunityData = SYNC_ATTRS["CommunityData"]
+SyncContextData = SYNC_ATTRS["ContextData"]
+SyncObjectIdentity = SYNC_ATTRS["ObjectIdentity"]
+SyncObjectType = SYNC_ATTRS["ObjectType"]
+SyncSnmpEngine = SYNC_ATTRS["SnmpEngine"]
+SyncUdpTransportTarget = SYNC_ATTRS["UdpTransportTarget"]
+sync_getCmd = SYNC_ATTRS["getCmd"]
+sync_nextCmd = SYNC_ATTRS["nextCmd"]
+sync_setCmd = SYNC_ATTRS["setCmd"]
+SYNC_HELPERS_AVAILABLE = SYNC_MODULE is not None
 
 
 INTEGER_CLS: Any | None = None
