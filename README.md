@@ -9,6 +9,8 @@
 
 Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home Assistant](https://www.home-assistant.io/) with live status, descriptions, and administrative control. Pair it with the included Lovelace card for a rich dashboard visualisation of your hardware.
 
+---
+
 ## Table of Contents
 
 - [Highlights](#highlights)
@@ -23,6 +25,8 @@ Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home A
 - [Changelog](https://github.com/OtisPresley/switch-manager/blob/main/CHANGELOG.md)
 - [Support](#support)
 
+---
+
 ## Highlights
 
 - 🔍 Automatic discovery of port count, speed, description, and operational status via SNMP v2c
@@ -31,11 +35,15 @@ Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home A
 - 🏷️ Service for updating the interface alias (`ifAlias`) without leaving Home Assistant
 - 🖼️ Lovelace card that mirrors the switch layout with colour-coded port status and quick actions
 
+---
+
 ## Requirements
 
 - Home Assistant 2023.12 or newer (recommended)
 - A switch reachable via SNMP v2c (UDP/161) with read access to interface tables and write access to `ifAlias`
 - The SNMP community string that grants the required permissions
+
+---
 
 ## Installation
 
@@ -52,11 +60,15 @@ Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home A
 3. Copy `www/community/switch-manager-card` into `www/community` (create the path if necessary).
 4. Restart Home Assistant.
 
+---
+
 ## Configuration
 
 1. Go to **Settings → Devices & services → Add integration** and search for **Switch Manager**.
 2. Enter the switch hostname/IP address, the SNMP community string, and optionally a friendly name or non-standard SNMP port.
 3. Once the flow completes, Home Assistant adds one `switch` entity per discovered interface. Entities follow the pattern `switch.<device_name>_port_<index>`.
+
+---
 
 ## Lovelace card
 
@@ -81,6 +93,8 @@ Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home A
 
 Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
 
+---
+
 ## Services
 
 ### Update a port description
@@ -94,15 +108,21 @@ data:
   description: Uplink to router
 ```
 
+---
+
 ### Toggle administrative state
 
 The state of each port entity reflects the interface's administrative status. Turning it **on** sets the port to *up*; turning it **off** sets it to *down*. Entity attributes include both administrative and operational status direct from SNMP.
+
+---
 
 ## Troubleshooting
 
 - **Ports missing:** Ensure the SNMP community string permits reads on the interface tables (`ifDescr`, `ifSpeed`, `ifOperStatus`).
 - **Description updates fail:** Confirm the community string has write permission for `ifAlias` (`1.3.6.1.2.1.31.1.1.1.18`).
 - **Unexpected speeds:** Some devices report zero or vendor-specific rates for unused interfaces; check the switch UI to confirm raw SNMP data.
+
+---
 
 ## Support
 
