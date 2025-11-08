@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - work
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Compile integration and card
+        run: |
+          python -m compileall custom_components/switch_manager www/community/switch-manager-card
+
+  frontend-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Lint Lovelace card (if configured)
+        run: |
+          if [ -f "www/community/switch-manager-card/package.json" ]; then
+            cd www/community/switch-manager-card
+            npm ci
+            npm run lint
+          else
+            echo 'No frontend tooling configured; skipping.'
+          fi
