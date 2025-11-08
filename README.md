@@ -9,7 +9,7 @@
 
 Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home Assistant](https://www.home-assistant.io/) with live status, descriptions, and administrative control. Pair it with the included Lovelace card for a rich dashboard visualisation of your hardware.
 
-## Contents
+## Table of Contents
 
 - [Features](#features)
 - [Requirements](#requirements)
