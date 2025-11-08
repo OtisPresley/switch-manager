@@ -85,22 +85,30 @@ def _load_helper_symbols() -> Dict[str, Any]:
     return helpers
 
 
-try:  # pragma: no cover - import depends on Home Assistant runtime
-    _HELPERS = _load_helper_symbols()
-    CommunityData = _HELPERS["CommunityData"]
-    ContextData = _HELPERS["ContextData"]
-    ObjectIdentity = _HELPERS["ObjectIdentity"]
-    ObjectType = _HELPERS["ObjectType"]
-    SnmpEngine = _HELPERS["SnmpEngine"]
-    UdpTransportTarget = _HELPERS["UdpTransportTarget"]
-    getCmd = _HELPERS["getCmd"]
-    nextCmd = _HELPERS["nextCmd"]
-    setCmd = _HELPERS["setCmd"]
-    from pysnmp.proto.rfc1902 import Integer, OctetString
-except Exception as import_err:  # pragma: no cover - handled at runtime
-    IMPORT_ERROR: Exception | None = import_err
-else:  # pragma: no cover - simple assignments
+_HELPERS: Dict[str, Any] | None = None
+IMPORT_ERROR: Exception | None = None
+
+
+def _ensure_helpers() -> Dict[str, Any]:
+    """Ensure pysnmp helpers are available after requirements install."""
+
+    global _HELPERS, IMPORT_ERROR
+
+    if _HELPERS is not None:
+        return _HELPERS
+
+    try:  # pragma: no cover - depends on runtime environment
+        helpers = _load_helper_symbols()
+        proto = import_module("pysnmp.proto.rfc1902")
+        helpers["Integer"] = getattr(proto, "Integer")
+        helpers["OctetString"] = getattr(proto, "OctetString")
+    except Exception as err:  # pragma: no cover - handled by config flow
+        IMPORT_ERROR = err
+        raise SnmpDependencyError("pysnmp is not available") from err
+
     IMPORT_ERROR = None
+    _HELPERS = helpers
+    return helpers
 
 
 def _raise_on_error(err_indication, err_status, err_index) -> None:
@@ -118,16 +126,29 @@ class SwitchSnmpClient:
     """Simple SNMP v2 client for polling switch information."""
 
     def __init__(self, host: str, community: str, port: int = 161) -> None:
-        if IMPORT_ERROR is not None:
-            raise SnmpDependencyError("pysnmp is not available") from IMPORT_ERROR
+        helpers = _ensure_helpers()
+
+        self._CommunityData = helpers["CommunityData"]
+        self._ContextData = helpers["ContextData"]
+        self._ObjectIdentity = helpers["ObjectIdentity"]
+        self._ObjectType = helpers["ObjectType"]
+        self._SnmpEngine = helpers["SnmpEngine"]
+        self._UdpTransportTarget = helpers["UdpTransportTarget"]
+        self._get_cmd = helpers["getCmd"]
+        self._next_cmd = helpers["nextCmd"]
+        self._set_cmd = helpers["setCmd"]
+        self._Integer = helpers["Integer"]
+        self._OctetString = helpers["OctetString"]
 
         self._host = host
         self._community = community
         self._port = port
-        self._engine = SnmpEngine()
-        self._target = UdpTransportTarget((self._host, self._port), timeout=2.0, retries=3)
-        self._auth = CommunityData(self._community, mpModel=1)
-        self._context = ContextData()
+        self._engine = self._SnmpEngine()
+        self._target = self._UdpTransportTarget(
+            (self._host, self._port), timeout=2.0, retries=3
+        )
+        self._auth = self._CommunityData(self._community, mpModel=1)
+        self._context = self._ContextData()
         self._lock = asyncio.Lock()
 
     async def async_close(self) -> None:
@@ -152,12 +173,12 @@ class SwitchSnmpClient:
 
     def _sync_get_value(self, oid: str) -> Any:
         err_indication, err_status, err_index, var_binds = next(
-            getCmd(
+            self._get_cmd(
                 self._engine,
                 self._auth,
                 self._target,
                 self._context,
-                ObjectType(ObjectIdentity(oid)),
+                self._ObjectType(self._ObjectIdentity(oid)),
             )
         )
         _raise_on_error(err_indication, err_status, err_index)
@@ -168,7 +189,7 @@ class SwitchSnmpClient:
 
         base_oid = SNMP_OIDS.get("ifAdminStatus", "1.3.6.1.2.1.2.2.1.7")
         oid = f"{base_oid}.{index}"
-        value = Integer(1 if up else 2)
+        value = self._Integer(1 if up else 2)
         await self._async_set(oid, value)
 
     async def async_set_alias(self, index: int, alias: str) -> None:
@@ -176,7 +197,7 @@ class SwitchSnmpClient:
 
         base_oid = SNMP_OIDS.get("ifAlias", "1.3.6.1.2.1.31.1.1.1.18")
         oid = f"{base_oid}.{index}"
-        value = OctetString(alias)
+        value = self._OctetString(alias)
         await self._async_set(oid, value)
 
     async def _async_set(self, oid: str, value: Any) -> None:
@@ -185,12 +206,12 @@ class SwitchSnmpClient:
 
     def _sync_set(self, oid: str, value: Any) -> None:
         err_indication, err_status, err_index, _ = next(
-            setCmd(
+            self._set_cmd(
                 self._engine,
                 self._auth,
                 self._target,
                 self._context,
-                ObjectType(ObjectIdentity(oid), value),
+                self._ObjectType(self._ObjectIdentity(oid), value),
             )
         )
         _raise_on_error(err_indication, err_status, err_index)
@@ -205,12 +226,12 @@ class SwitchSnmpClient:
         result: Dict[int, str] = {}
         start_oid = oid
 
-        for err_indication, err_status, err_index, var_binds in nextCmd(
+        for err_indication, err_status, err_index, var_binds in self._next_cmd(
             self._engine,
             self._auth,
             self._target,
             self._context,
-            ObjectType(ObjectIdentity(start_oid)),
+            self._ObjectType(self._ObjectIdentity(start_oid)),
             lexicographicMode=False,
         ):
             _raise_on_error(err_indication, err_status, err_index)
