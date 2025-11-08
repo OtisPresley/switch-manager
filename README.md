@@ -1,60 +1,49 @@
-# Switch Manager for Home Assistant
+# Switch Manager: Home Assistant Custom Integration
 
-<p align="center">
-  <a href="https://hacs.xyz/">
-    <img src="https://img.shields.io/badge/HACS-Custom-41BDF5?style=flat-square&logo=homeassistant" alt="HACS Custom" />
-  </a>
-  <a href="https://github.com/OtisPresley/switch-manager/actions/workflows/ci.yaml">
-    <img src="https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/ci.yaml?branch=main&label=CI&style=flat-square&logo=github" alt="Continuous integration" />
-  </a>
-  <a href="https://github.com/OtisPresley/switch-manager/actions/workflows/hassfest.yaml">
-    <img src="https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/hassfest.yaml?branch=main&label=hassfest&style=flat-square&logo=homeassistant" alt="Validate with hassfest" />
-  </a>
-  <a href="https://github.com/OtisPresley/switch-manager/actions/workflows/hacs.yaml">
-    <img src="https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/hacs.yaml?branch=main&label=HACS&style=flat-square&logo=homeassistant" alt="Validate with HACS" />
-  </a>
-  <a href="https://github.com/OtisPresley/switch-manager/releases">
-    <img src="https://img.shields.io/github/v/release/OtisPresley/switch-manager?style=flat-square&logo=github" alt="Latest release" />
-  </a>
-  <a href="https://github.com/OtisPresley/switch-manager/releases">
-    <img src="https://img.shields.io/github/downloads/OtisPresley/switch-manager/total?style=flat-square&logo=github" alt="GitHub downloads" />
-  </a>
-  <a href="https://github.com/OtisPresley/switch-manager/issues">
-    <img src="https://img.shields.io/github/issues/OtisPresley/switch-manager?style=flat-square&logo=github" alt="GitHub issues" />
-  </a>
-  <a href="https://github.com/OtisPresley/switch-manager/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/OtisPresley/switch-manager?style=flat-square" alt="License" />
-  </a>
-</p>
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-41BDF5?logo=home-assistant&logoColor=white&style=flat)](https://www.home-assistant.io/)
+[![HACS Badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz)
+[![License: MIT](https://raw.githubusercontent.com/otispresley/switch-manager/main/assets/license-mit.svg)](https://github.com/OtisPresley/switch-manager/blob/main/LICENSE)
+[![hassfest](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/hassfest.yaml?branch=main&label=hassfest)](https://github.com/OtisPresley/switch-manager/actions/workflows/hassfest.yaml)
+[![HACS](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/hacs.yaml?branch=main&label=HACS)](https://github.com/OtisPresley/switch-manager/actions/workflows/hacs.yaml)
+[![CI](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/ci.yaml?branch=main&event=push)](https://github.com/OtisPresley/switch-manager/actions/workflows/ci.yaml)
 
-Switch Manager discovers an SNMP-enabled switch and exposes each port to Home Assistant with live status, descriptions, and administrative control. Pair it with the included Lovelace card for a rich dashboard visualisation of your hardware.
+Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home Assistant](https://www.home-assistant.io/) with live status, descriptions, and administrative control. Pair it with the included Lovelace card for a rich dashboard visualisation of your hardware.
 
-## Contents
+---
 
-- [Features](#features)
+## Table of Contents
+
+- [Highlights](#highlights)
 - [Requirements](#requirements)
 - [Installation](#installation)
+  - [HACS (recommended)](#hacs-recommended)
+  - [Manual Install](#manual-install)
 - [Configuration](#configuration)
 - [Lovelace card](#lovelace-card)
 - [Services](#services)
 - [Troubleshooting](#troubleshooting)
+- [Changelog](https://github.com/OtisPresley/switch-manager/blob/main/CHANGELOG.md)
 - [Support](#support)
 
-## Features
+---
+
+## Highlights
 
 - 🔍 Automatic discovery of port count, speed, description, and operational status via SNMP v2c
 - 🔄 Background polling that keeps Home Assistant entities in sync with switch updates
 - 🎚️ One `switch` entity per interface for toggling administrative state (up/down)
 - 🏷️ Service for updating the interface alias (`ifAlias`) without leaving Home Assistant
 - 🖼️ Lovelace card that mirrors the switch layout with colour-coded port status and quick actions
-- 🧭 Automatic population of device metadata (name, firmware, manufacturer) from core SNMP system OIDs
+
+---
 
 ## Requirements
 
 - Home Assistant 2023.12 or newer (recommended)
 - A switch reachable via SNMP v2c (UDP/161) with read access to interface tables and write access to `ifAlias`
 - The SNMP community string that grants the required permissions
-- pysnmp 4.x (installed automatically when adding the integration through HACS)
+
+---
 
 ## Installation
 
@@ -71,11 +60,15 @@ Switch Manager discovers an SNMP-enabled switch and exposes each port to Home As
 3. Copy `www/community/switch-manager-card` into `www/community` (create the path if necessary).
 4. Restart Home Assistant.
 
+---
+
 ## Configuration
 
 1. Go to **Settings → Devices & services → Add integration** and search for **Switch Manager**.
 2. Enter the switch hostname/IP address, the SNMP community string, and optionally a friendly name or non-standard SNMP port.
 3. Once the flow completes, Home Assistant adds one `switch` entity per discovered interface. Entities follow the pattern `switch.<device_name>_port_<index>`.
+
+---
 
 ## Lovelace card
 
@@ -123,6 +116,8 @@ ports:
 
 Markers adopt the port’s administrative status—green for enabled, red for disabled, amber for unknown—and clicking them opens the same management dialog shown in the grid layout.
 
+---
+
 ## Services
 
 ### Update a port description
@@ -136,9 +131,13 @@ data:
   description: Uplink to router
 ```
 
+---
+
 ### Toggle administrative state
 
 The state of each port entity reflects the interface's administrative status. Turning it **on** sets the port to *up*; turning it **off** sets it to *down*. Entity attributes include both administrative and operational status direct from SNMP.
+
+---
 
 ## Troubleshooting
 
@@ -146,15 +145,14 @@ The state of each port entity reflects the interface's administrative status. Tu
 - **Description updates fail:** Confirm the community string has write permission for `ifAlias` (`1.3.6.1.2.1.31.1.1.1.18`).
 - **Unexpected speeds:** Some devices report zero or vendor-specific rates for unused interfaces; check the switch UI to confirm raw SNMP data.
 
+---
+
 ## Support
 
-Need help or have a feature request? Open an issue on the [GitHub tracker](https://github.com/OtisPresley/switch-manager/issues) and we’ll take a look.
+- Open an issue on the [GitHub tracker](https://github.com/OtisPresley/switch-manager/issues) if you run into problems or have feature requests.
+- Contributions and feedback are welcome!
 
-<p align="center">
-  <a href="https://ko-fi.com/otispresley">
-    <img src="https://img.shields.io/badge/Ko--fi-Support%20the%20project-FF5E5B?style=flat-square&logo=ko-fi" alt="Ko-fi" />
-  </a>
-  <a href="https://paypal.me/OtisPresley">
-    <img src="https://img.shields.io/badge/PayPal-Donate-00457C?style=flat-square&logo=paypal" alt="PayPal" />
-  </a>
-</p>
+If you find this integration useful and want to support development, you can:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-orange)](https://www.buymeacoffee.com/OtisPresley)
+[![Donate via PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/OtisPresley)
