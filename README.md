@@ -11,16 +11,18 @@ Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home A
 
 ## Table of Contents
 
-- [Features](#features)
+- [Highlights](#highlights)
 - [Requirements](#requirements)
 - [Installation](#installation)
+  - [HACS (recommended)](#hacs-recommended)
+  - [Manual Install](#manual-install)
 - [Configuration](#configuration)
 - [Lovelace card](#lovelace-card)
 - [Services](#services)
 - [Troubleshooting](#troubleshooting)
 - [Support](#support)
 
-## Features
+## Highlights
 
 - 🔍 Automatic discovery of port count, speed, description, and operational status via SNMP v2c
 - 🔄 Background polling that keeps Home Assistant entities in sync with switch updates
