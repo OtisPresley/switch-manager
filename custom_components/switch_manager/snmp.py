@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import timedelta
 from importlib import import_module
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from .const import SNMP_OIDS
 
@@ -21,7 +21,7 @@ class SnmpDependencyError(SnmpError):
     """Raised when pysnmp helpers cannot be loaded."""
 
 
-HELPER_SYMBOLS = (
+HELPER_SYMBOLS: Sequence[str] = (
     "CommunityData",
     "ContextData",
     "ObjectIdentity",
@@ -33,39 +33,73 @@ HELPER_SYMBOLS = (
     "setCmd",
 )
 
-def _load_helper_symbols() -> Dict[str, Any]:
-    """Import the pysnmp helper attributes from the canonical modules."""
+HELPER_MODULES: Sequence[str] = (
+    "pysnmp.hlapi",
+    "pysnmp.hlapi.v3arch",
+    "pysnmp.hlapi.v1arch",
+    "pysnmp.hlapi.cmdgen",
+)
+
+PROTO_MODULES: Sequence[str] = (
+    "pysnmp.proto.rfc1902",
+    "pysnmp.smi.rfc1902",
+)
+
+
+def _import_optional(module_name: str) -> Any | None:
+    """Attempt to import the given module, returning None if unavailable."""
 
     try:
-        hlapi = import_module("pysnmp.hlapi")
+        return import_module(module_name)
     except ImportError as err:  # pragma: no cover - depends on runtime env
-        raise SnmpDependencyError("pysnmp is not installed") from err
+        _LOGGER.debug("Unable to import %s: %s", module_name, err)
+        return None
 
-    helpers: Dict[str, Any] = {}
-    missing: List[str] = []
 
-    for symbol in HELPER_SYMBOLS:
-        attr = getattr(hlapi, symbol, None)
+def _import_first_available(module_names: Sequence[str], error: str) -> Any:
+    """Return the first successfully imported module from the candidates."""
+
+    for module_name in module_names:
+        module = _import_optional(module_name)
+        if module is not None:
+            return module
+    raise SnmpDependencyError(error)
+
+
+def _fill_helpers_from_module(
+    module: Any, missing: List[str], helpers: Dict[str, Any]
+) -> None:
+    """Populate helper attributes from the provided module."""
+
+    for symbol in list(missing):
+        attr = getattr(module, symbol, None)
         if attr is None:
-            missing.append(symbol)
             continue
         helpers[symbol] = attr
+        missing.remove(symbol)
+
+def _load_helper_symbols() -> Dict[str, Any]:
+    """Import the pysnmp helper attributes from available modules."""
+
+    helpers: Dict[str, Any] = {}
+    missing: List[str] = list(HELPER_SYMBOLS)
+
+    for module_name in HELPER_MODULES:
+        module = _import_optional(module_name)
+        if module is None:
+            continue
+        _fill_helpers_from_module(module, missing, helpers)
+        if not missing:
+            break
 
     if missing:
         raise SnmpDependencyError(
-            "pysnmp missing attributes: " + ", ".join(missing)
+            "pysnmp missing attributes: " + ", ".join(sorted(missing))
         )
 
-    try:
-        proto = import_module("pysnmp.proto.rfc1902")
-    except ImportError as err:  # pragma: no cover - defensive
-        raise SnmpDependencyError("pysnmp proto helpers unavailable") from err
-
-    try:
-        helpers["Integer"] = getattr(proto, "Integer")
-        helpers["OctetString"] = getattr(proto, "OctetString")
-    except AttributeError as err:  # pragma: no cover - unexpected layout
-        raise SnmpDependencyError("pysnmp proto helpers unavailable") from err
+    proto = _import_first_available(PROTO_MODULES, "pysnmp proto helpers unavailable")
+    helpers["Integer"] = getattr(proto, "Integer")
+    helpers["OctetString"] = getattr(proto, "OctetString")
 
     return helpers
 
@@ -84,7 +118,10 @@ def _ensure_helpers() -> Dict[str, Any]:
 
     try:  # pragma: no cover - depends on runtime environment
         helpers = _load_helper_symbols()
-    except Exception as err:  # pragma: no cover - handled by config flow
+    except SnmpDependencyError as err:  # pragma: no cover - handled by config flow
+        IMPORT_ERROR = err
+        raise
+    except Exception as err:  # pragma: no cover - defensive fallback
         IMPORT_ERROR = err
         raise SnmpDependencyError("pysnmp is not available") from err
 

@@ -57,9 +57,11 @@ class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     port,
                 )
                 ports = await client.async_get_port_data()
-            except SnmpDependencyError:
+            except SnmpDependencyError as err:
+                _LOGGER.error("pysnmp dependency issue: %s", err)
                 errors["base"] = "missing_dependency"
-            except SnmpError:
+            except SnmpError as err:
+                _LOGGER.error("Unable to communicate with %s: %s", user_input[CONF_HOST], err)
                 errors["base"] = "cannot_connect"
             else:
                 if not ports:
