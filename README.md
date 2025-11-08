@@ -2,25 +2,25 @@
 
 <p align="center">
   <a href="https://hacs.xyz/">
-    <img src="https://img.shields.io/badge/HACS-Custom-41BDF5?style=for-the-badge&logo=homeassistant" alt="HACS Custom" />
+    <img src="https://img.shields.io/badge/HACS-Custom-41BDF5?style=flat&logo=homeassistant" alt="HACS Custom" />
   </a>
   <a href="https://github.com/OtisPresley/switch-manager/releases">
-    <img src="https://img.shields.io/github/v/release/OtisPresley/switch-manager?style=for-the-badge&logo=github" alt="GitHub release" />
+    <img src="https://img.shields.io/github/v/release/OtisPresley/switch-manager?style=flat&logo=github" alt="GitHub release" />
   </a>
   <a href="https://github.com/OtisPresley/switch-manager/issues">
-    <img src="https://img.shields.io/github/issues/OtisPresley/switch-manager?style=for-the-badge&logo=github" alt="GitHub issues" />
+    <img src="https://img.shields.io/github/issues/OtisPresley/switch-manager?style=flat&logo=github" alt="GitHub issues" />
   </a>
   <a href="https://github.com/OtisPresley/switch-manager/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/OtisPresley/switch-manager?style=for-the-badge" alt="License" />
+    <img src="https://img.shields.io/github/license/OtisPresley/switch-manager?style=flat" alt="License" />
   </a>
 </p>
 
 <p align="center">
   <a href="https://ko-fi.com/otispresley">
-    <img src="https://img.shields.io/badge/Ko--fi-Support%20the%20project-FF5E5B?style=for-the-badge&logo=ko-fi" alt="Ko-fi" />
+    <img src="https://img.shields.io/badge/Ko--fi-Support%20the%20project-FF5E5B?style=flat&logo=ko-fi" alt="Ko-fi" />
   </a>
   <a href="https://paypal.me/OtisPresley">
-    <img src="https://img.shields.io/badge/PayPal-Donate-00457C?style=for-the-badge&logo=paypal" alt="PayPal" />
+    <img src="https://img.shields.io/badge/PayPal-Donate-00457C?style=flat&logo=paypal" alt="PayPal" />
   </a>
 </p>
 
