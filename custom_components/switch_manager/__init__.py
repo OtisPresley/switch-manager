@@ -24,7 +24,7 @@ from .const import (
     SERVICE_FIELD_ENTITY_ID,
     SERVICE_SET_PORT_DESCRIPTION,
 )
-from .snmp import SnmpError, SwitchSnmpClient
+from .snmp import SnmpError, SwitchSnmpClient, reset_backend_cache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SwitchManagerConfigEntry
         await async_process_requirements(hass, DOMAIN, REQUIREMENTS)
     except Exception as err:  # pragma: no cover - depends on runtime
         raise ConfigEntryNotReady(f"Unable to install pysnmp requirements: {err}") from err
+    reset_backend_cache()
 
     client = await SwitchSnmpClient.async_create(
         entry.data[CONF_HOST],

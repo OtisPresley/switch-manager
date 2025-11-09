@@ -12,7 +12,12 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.requirements import async_process_requirements
 
 from .const import CONF_COMMUNITY, DEFAULT_PORT, DOMAIN, REQUIREMENTS
-from .snmp import SnmpDependencyError, SnmpError, SwitchSnmpClient
+from .snmp import (
+    SnmpDependencyError,
+    SnmpError,
+    SwitchSnmpClient,
+    reset_backend_cache,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +44,7 @@ class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "missing_dependency"
                 else:
                     self._requirements_ready = True
+                    reset_backend_cache()
 
             if errors:
                 return self.async_show_form(

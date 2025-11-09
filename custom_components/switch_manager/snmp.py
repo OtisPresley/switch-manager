@@ -237,6 +237,14 @@ _BACKEND: _SnmpBackend | None = None
 _BACKEND_ERROR: Exception | None = None
 
 
+def reset_backend_cache() -> None:
+    """Clear any cached backend or import error state."""
+
+    global _BACKEND, _BACKEND_ERROR
+    _BACKEND = None
+    _BACKEND_ERROR = None
+
+
 def _get_backend() -> _SnmpBackend:
     """Return a cached backend, discovering helpers if necessary."""
 
