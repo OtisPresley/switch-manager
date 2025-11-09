@@ -39,11 +39,25 @@ HELPER_MODULES: Sequence[str] = (
     "pysnmp.hlapi.v3arch",
     "pysnmp.hlapi.v1arch",
     "pysnmp.hlapi.cmdgen",
+    # Dedicated helper submodules present in newer pysnmp releases.
+    "pysnmp.hlapi.getcmd",
+    "pysnmp.hlapi.nextcmd",
+    "pysnmp.hlapi.setcmd",
+    "pysnmp.hlapi.v1arch.getcmd",
+    "pysnmp.hlapi.v1arch.nextcmd",
+    "pysnmp.hlapi.v1arch.setcmd",
     # Asyncio shims introduced in newer pysnmp releases expose the same helpers
     # but under different module paths. We probe them here so installations that
     # only ship the asyncio layout still work without forcing a downgrade.
     "pysnmp.hlapi.asyncio",
+    "pysnmp.hlapi.asyncio.getcmd",
+    "pysnmp.hlapi.asyncio.nextcmd",
+    "pysnmp.hlapi.asyncio.setcmd",
     "pysnmp.hlapi.v3arch.asyncio",
+    "pysnmp.hlapi.v1arch.asyncio",
+    "pysnmp.hlapi.v1arch.asyncio.getcmd",
+    "pysnmp.hlapi.v1arch.asyncio.nextcmd",
+    "pysnmp.hlapi.v1arch.asyncio.setcmd",
     "pysnmp.hlapi.asyncio.cmdgen",
 )
 
