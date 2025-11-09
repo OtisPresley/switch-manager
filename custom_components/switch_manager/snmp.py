@@ -21,23 +21,28 @@ class SnmpDependencyError(SnmpError):
     """Raised when pysnmp helpers cannot be loaded."""
 
 
-REQUIRED_HELPER_SYMBOLS: Sequence[str] = (
+CORE_HELPER_SYMBOLS: Sequence[str] = (
     "SnmpEngine",
     "CommunityData",
     "UdpTransportTarget",
     "ObjectType",
     "ObjectIdentity",
-    "getCmd",
-    "nextCmd",
-    "setCmd",
 )
 
 OPTIONAL_HELPER_SYMBOLS: Sequence[str] = ("ContextData",)
+
+COMMAND_SYMBOLS: Sequence[str] = ("getCmd", "nextCmd", "setCmd")
 
 CANDIDATE_HELPER_MODULES: Sequence[str] = (
     "pysnmp.hlapi",
     "pysnmp.hlapi.v1arch",
     "pysnmp.hlapi.v3arch",
+)
+
+COMMAND_GENERATOR_MODULES: Sequence[str] = (
+    "pysnmp.hlapi.cmdgen",
+    "pysnmp.hlapi.v1arch.cmdgen",
+    "pysnmp.hlapi.v3arch.cmdgen",
 )
 
 PROTO_MODULES: Sequence[str] = (
@@ -69,31 +74,54 @@ def _import_first_available(module_names: Sequence[str], error: str) -> Any:
 def _load_helper_symbols() -> Dict[str, Any]:
     """Import pysnmp helpers and supporting types."""
 
+    command_errors: list[str] = []
+
     for module_name in CANDIDATE_HELPER_MODULES:
         module = _import_optional(module_name)
         if module is None:
             continue
 
-        missing = [
-            symbol
-            for symbol in REQUIRED_HELPER_SYMBOLS
-            if getattr(module, symbol, None) is None
+        missing_core = [
+            symbol for symbol in CORE_HELPER_SYMBOLS if getattr(module, symbol, None) is None
         ]
-        if missing:
+        if missing_core:
             _LOGGER.debug(
-                "Module %s missing symbols: %s", module_name, ", ".join(missing)
+                "Module %s missing core helpers: %s", module_name, ", ".join(missing_core)
             )
             continue
 
         helpers: Dict[str, Any] = {
-            symbol: getattr(module, symbol)
-            for symbol in REQUIRED_HELPER_SYMBOLS
+            symbol: getattr(module, symbol) for symbol in CORE_HELPER_SYMBOLS
         }
 
         for symbol in OPTIONAL_HELPER_SYMBOLS:
             attr = getattr(module, symbol, None)
             if attr is not None:
                 helpers[symbol] = attr
+
+        missing_commands = [
+            symbol for symbol in COMMAND_SYMBOLS if getattr(module, symbol, None) is None
+        ]
+
+        if missing_commands:
+            _LOGGER.debug(
+                "Module %s missing command helpers: %s",
+                module_name,
+                ", ".join(missing_commands),
+            )
+
+            command_wrappers = _build_command_wrappers(missing_commands)
+            if command_wrappers is None:
+                command_errors.append(
+                    f"{module_name} missing {', '.join(missing_commands)}"
+                )
+                continue
+
+            helpers.update(command_wrappers)
+
+        else:
+            for symbol in COMMAND_SYMBOLS:
+                helpers[symbol] = getattr(module, symbol)
 
         proto = _import_first_available(
             PROTO_MODULES, "pysnmp proto helpers unavailable"
@@ -103,7 +131,48 @@ def _load_helper_symbols() -> Dict[str, Any]:
 
         return helpers
 
+    if command_errors:
+        raise SnmpDependencyError(
+            "pysnmp command helpers unavailable: " + "; ".join(command_errors)
+        )
     raise SnmpDependencyError("pysnmp command helpers are unavailable")
+
+
+def _build_command_wrappers(missing: Sequence[str]) -> Dict[str, Any] | None:
+    """Attempt to construct command helpers using CommandGenerator."""
+
+    for module_name in COMMAND_GENERATOR_MODULES:
+        module = _import_optional(module_name)
+        if module is None:
+            continue
+
+        command_generator_cls = getattr(module, "CommandGenerator", None)
+        if command_generator_cls is None:
+            continue
+
+        def _wrap(method_name: str):
+            def _command(*args, **kwargs):
+                generator = command_generator_cls()
+                result = getattr(generator, method_name)(*args, **kwargs)
+                # CommandGenerator methods return a tuple, but the HLAPI
+                # helpers expose an iterator. Yield once to mimic the same API.
+                yield result
+
+            return _command
+
+        wrappers: Dict[str, Any] = {}
+        for symbol in COMMAND_SYMBOLS:
+            if symbol not in missing:
+                continue
+            if getattr(module, symbol, None) is not None:
+                wrappers[symbol] = getattr(module, symbol)
+                continue
+            wrappers[symbol] = _wrap(symbol)
+
+        if wrappers:
+            return wrappers
+
+    return None
 
 
 _HELPERS: Dict[str, Any] | None = None
