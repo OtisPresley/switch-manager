@@ -1,0 +1,13 @@
+set_port_description:
+  name: Set port description
+  description: Update the alias/description for a switch port.
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          domain: switch
+    description:
+      required: true
+      selector:
+        text:

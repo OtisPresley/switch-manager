@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Switch Manager",
+        "description": "Connect to a network switch via SNMP.",
+        "data": {
+          "host": "Host",
+          "community": "Community string",
+          "port": "Port",
+          "name": "Name"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the device using SNMP.",
+      "missing_dependency": "SNMP support is unavailable. Install pysnmp 4.x.",
+      "no_ports": "The device did not report any ports via SNMP."
+    }
+  },
+  "services": {
+    "set_port_description": {
+      "name": "Set port description",
+      "description": "Update the alias/description for a switch port.",
+      "fields": {
+        "entity_id": {
+          "name": "Port switch entity",
+          "description": "The switch entity representing the port."
+        },
+        "description": {
+          "name": "Description",
+          "description": "The new description to assign to the port."
+        }
+      }
+    }
+  }
+}
