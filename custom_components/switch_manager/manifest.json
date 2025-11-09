@@ -1,0 +1,13 @@
+{
+  "domain": "switch_manager",
+  "name": "Switch Manager",
+  "codeowners": ["@OtisPresley"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/OtisPresley/switch-manager",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/OtisPresley/switch-manager/issues",
+  "requirements": ["pysnmp>=4.4.12"],
+  "version": "0.1.0"
+}
