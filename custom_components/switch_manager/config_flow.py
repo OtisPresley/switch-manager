@@ -56,6 +56,9 @@ class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     user_input[CONF_COMMUNITY],
                     port,
                 )
+                system_info = await client.async_get_system_info()
+                if not system_info:
+                    raise SnmpError("No system information returned")
                 ports = await client.async_get_port_data()
             except SnmpDependencyError as err:
                 _LOGGER.error("pysnmp dependency issue: %s", err)

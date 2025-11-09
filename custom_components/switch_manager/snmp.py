@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import timedelta
 from importlib import import_module
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, Iterable, List, Tuple
 
 from .const import SNMP_OIDS
 
@@ -21,184 +21,249 @@ class SnmpDependencyError(SnmpError):
     """Raised when pysnmp helpers cannot be loaded."""
 
 
-CORE_HELPER_SYMBOLS: Sequence[str] = (
-    "SnmpEngine",
-    "CommunityData",
-    "UdpTransportTarget",
-    "ObjectType",
-    "ObjectIdentity",
-)
+class _SnmpBackend:
+    """Shared interface for SNMP helper backends."""
 
-OPTIONAL_HELPER_SYMBOLS: Sequence[str] = ("ContextData",)
+    integer_cls: Any
+    octet_string_cls: Any
 
-COMMAND_SYMBOLS: Sequence[str] = ("getCmd", "nextCmd", "setCmd")
+    def create_context(self, host: str, port: int, community: str) -> Any:
+        raise NotImplementedError
 
-CANDIDATE_HELPER_MODULES: Sequence[str] = (
-    "pysnmp.hlapi",
-    "pysnmp.hlapi.v1arch",
-    "pysnmp.hlapi.v3arch",
-)
+    def get(self, ctx: Any, oid: str) -> Any:
+        raise NotImplementedError
 
-COMMAND_GENERATOR_MODULES: Sequence[str] = (
-    "pysnmp.hlapi.cmdgen",
-    "pysnmp.hlapi.v1arch.cmdgen",
-    "pysnmp.hlapi.v3arch.cmdgen",
-)
+    def set(self, ctx: Any, oid: str, value: Any) -> None:
+        raise NotImplementedError
 
-PROTO_MODULES: Sequence[str] = (
-    "pysnmp.proto.rfc1902",
-    "pysnmp.smi.rfc1902",
-)
+    def walk(self, ctx: Any, oid: str) -> Iterable[Tuple[Any, Any]]:
+        raise NotImplementedError
 
+    def make_integer(self, value: int) -> Any:
+        return self.integer_cls(value)
 
-def _import_optional(module_name: str) -> Any | None:
-    """Attempt to import the given module, returning None if unavailable."""
+    def make_octet_string(self, value: str) -> Any:
+        return self.octet_string_cls(value)
 
-    try:
-        return import_module(module_name)
-    except ImportError as err:  # pragma: no cover - depends on runtime env
-        _LOGGER.debug("Unable to import %s: %s", module_name, err)
+    def close(self, ctx: Any) -> None:  # pragma: no cover - optional for backends
         return None
 
 
-def _import_first_available(module_names: Sequence[str], error: str) -> Any:
-    """Return the first successfully imported module from the candidates."""
+class _HlapiBackend(_SnmpBackend):
+    """Backend using the pysnmp high level API."""
 
-    for module_name in module_names:
-        module = _import_optional(module_name)
-        if module is not None:
-            return module
-    raise SnmpDependencyError(error)
+    def __init__(self) -> None:
+        try:
+            module = import_module("pysnmp.hlapi")
+        except ImportError as err:  # pragma: no cover - depends on runtime env
+            raise SnmpDependencyError("pysnmp.hlapi is not available") from err
 
-
-def _load_helper_symbols() -> Dict[str, Any]:
-    """Import pysnmp helpers and supporting types."""
-
-    command_errors: list[str] = []
-
-    for module_name in CANDIDATE_HELPER_MODULES:
-        module = _import_optional(module_name)
-        if module is None:
-            continue
-
-        missing_core = [
-            symbol for symbol in CORE_HELPER_SYMBOLS if getattr(module, symbol, None) is None
-        ]
-        if missing_core:
-            _LOGGER.debug(
-                "Module %s missing core helpers: %s", module_name, ", ".join(missing_core)
+        missing = [
+            symbol
+            for symbol in (
+                "SnmpEngine",
+                "CommunityData",
+                "UdpTransportTarget",
+                "ObjectType",
+                "ObjectIdentity",
+                "getCmd",
+                "nextCmd",
+                "setCmd",
             )
-            continue
-
-        helpers: Dict[str, Any] = {
-            symbol: getattr(module, symbol) for symbol in CORE_HELPER_SYMBOLS
-        }
-
-        for symbol in OPTIONAL_HELPER_SYMBOLS:
-            attr = getattr(module, symbol, None)
-            if attr is not None:
-                helpers[symbol] = attr
-
-        missing_commands = [
-            symbol for symbol in COMMAND_SYMBOLS if getattr(module, symbol, None) is None
+            if getattr(module, symbol, None) is None
         ]
-
-        if missing_commands:
-            _LOGGER.debug(
-                "Module %s missing command helpers: %s",
-                module_name,
-                ", ".join(missing_commands),
+        if missing:
+            raise SnmpDependencyError(
+                "pysnmp.hlapi missing helpers: " + ", ".join(missing)
             )
 
-            command_wrappers = _build_command_wrappers(missing_commands)
-            if command_wrappers is None:
-                command_errors.append(
-                    f"{module_name} missing {', '.join(missing_commands)}"
-                )
-                continue
+        self._SnmpEngine = module.SnmpEngine
+        self._CommunityData = module.CommunityData
+        self._UdpTransportTarget = module.UdpTransportTarget
+        self._ContextData = getattr(module, "ContextData", None)
+        self._ObjectType = module.ObjectType
+        self._ObjectIdentity = module.ObjectIdentity
+        self._getCmd = module.getCmd
+        self._nextCmd = module.nextCmd
+        self._setCmd = module.setCmd
 
-            helpers.update(command_wrappers)
+        proto = import_module("pysnmp.proto.rfc1902")
+        self.integer_cls = getattr(proto, "Integer")
+        self.octet_string_cls = getattr(proto, "OctetString")
 
-        else:
-            for symbol in COMMAND_SYMBOLS:
-                helpers[symbol] = getattr(module, symbol)
+    def create_context(self, host: str, port: int, community: str) -> Tuple[Any, ...]:
+        engine = self._SnmpEngine()
+        auth = self._CommunityData(community, mpModel=1)
+        target = self._UdpTransportTarget((host, port), timeout=2.0, retries=3)
+        context = self._ContextData() if self._ContextData is not None else None
+        return engine, auth, target, context
 
-        proto = _import_first_available(
-            PROTO_MODULES, "pysnmp proto helpers unavailable"
+    def _build_args(self, ctx: Tuple[Any, ...]) -> List[Any]:
+        engine, auth, target, context = ctx
+        args: List[Any] = [engine, auth, target]
+        if context is not None:
+            args.append(context)
+        return args
+
+    def get(self, ctx: Tuple[Any, ...], oid: str) -> Any:
+        args = self._build_args(ctx)
+        object_type = self._ObjectType(self._ObjectIdentity(oid))
+        iterator = self._getCmd(
+            *args,
+            object_type,
+            lookupNames=False,
+            lookupValues=False,
         )
-        helpers["Integer"] = getattr(proto, "Integer")
-        helpers["OctetString"] = getattr(proto, "OctetString")
+        try:
+            err_indication, err_status, err_index, var_binds = next(iterator)
+        except StopIteration as err:  # pragma: no cover - defensive
+            raise SnmpError("SNMP GET returned no data") from err
+        _raise_on_error(err_indication, err_status, err_index)
+        return var_binds[0][1]
 
-        return helpers
-
-    if command_errors:
-        raise SnmpDependencyError(
-            "pysnmp command helpers unavailable: " + "; ".join(command_errors)
+    def set(self, ctx: Tuple[Any, ...], oid: str, value: Any) -> None:
+        args = self._build_args(ctx)
+        object_type = self._ObjectType(self._ObjectIdentity(oid), value)
+        iterator = self._setCmd(
+            *args,
+            object_type,
+            lookupNames=False,
+            lookupValues=False,
         )
-    raise SnmpDependencyError("pysnmp command helpers are unavailable")
+        try:
+            err_indication, err_status, err_index, _ = next(iterator)
+        except StopIteration as err:  # pragma: no cover - defensive
+            raise SnmpError("SNMP SET returned no data") from err
+        _raise_on_error(err_indication, err_status, err_index)
+
+    def walk(self, ctx: Tuple[Any, ...], oid: str) -> Iterable[Tuple[Any, Any]]:
+        args = self._build_args(ctx)
+        object_type = self._ObjectType(self._ObjectIdentity(oid))
+        iterator = self._nextCmd(
+            *args,
+            object_type,
+            lexicographicMode=False,
+            lookupNames=False,
+            lookupValues=False,
+        )
+        for err_indication, err_status, err_index, var_binds in iterator:
+            _raise_on_error(err_indication, err_status, err_index)
+            for item in var_binds:
+                yield item
+
+    def close(self, ctx: Tuple[Any, ...]) -> None:
+        engine = ctx[0]
+        dispatcher = getattr(engine, "transportDispatcher", None)
+        if dispatcher is not None:  # pragma: no branch - attribute may be missing
+            dispatcher.closeDispatcher()
 
 
-def _build_command_wrappers(missing: Sequence[str]) -> Dict[str, Any] | None:
-    """Attempt to construct command helpers using CommandGenerator."""
+class _CmdGenBackend(_SnmpBackend):
+    """Fallback backend using CommandGenerator helpers."""
 
-    for module_name in COMMAND_GENERATOR_MODULES:
-        module = _import_optional(module_name)
-        if module is None:
-            continue
+    def __init__(self) -> None:
+        try:
+            module = import_module("pysnmp.entity.rfc3413.oneliner.cmdgen")
+        except ImportError as err:  # pragma: no cover - depends on runtime env
+            raise SnmpDependencyError("pysnmp CommandGenerator helpers unavailable") from err
 
-        command_generator_cls = getattr(module, "CommandGenerator", None)
-        if command_generator_cls is None:
-            continue
+        missing = [
+            symbol
+            for symbol in ("CommandGenerator", "CommunityData", "UdpTransportTarget")
+            if getattr(module, symbol, None) is None
+        ]
+        if missing:
+            raise SnmpDependencyError(
+                "pysnmp command generator missing helpers: " + ", ".join(missing)
+            )
 
-        def _wrap(method_name: str):
-            def _command(*args, **kwargs):
-                generator = command_generator_cls()
-                result = getattr(generator, method_name)(*args, **kwargs)
-                # CommandGenerator methods return a tuple, but the HLAPI
-                # helpers expose an iterator. Yield once to mimic the same API.
-                yield result
+        proto = import_module("pysnmp.proto.rfc1902")
+        self.integer_cls = getattr(proto, "Integer")
+        self.octet_string_cls = getattr(proto, "OctetString")
 
-            return _command
+        self._CommandGenerator = module.CommandGenerator
+        self._CommunityData = module.CommunityData
+        self._UdpTransportTarget = module.UdpTransportTarget
 
-        wrappers: Dict[str, Any] = {}
-        for symbol in COMMAND_SYMBOLS:
-            if symbol not in missing:
-                continue
-            if getattr(module, symbol, None) is not None:
-                wrappers[symbol] = getattr(module, symbol)
-                continue
-            wrappers[symbol] = _wrap(symbol)
+    def create_context(self, host: str, port: int, community: str) -> Tuple[Any, Any]:
+        auth = self._CommunityData(community, mpModel=1)
+        target = self._UdpTransportTarget((host, port), timeout=2.0, retries=3)
+        return auth, target
 
-        if wrappers:
-            return wrappers
+    def _run(self, method: str, ctx: Tuple[Any, Any], *args: Any) -> Tuple[Any, ...]:
+        auth, target = ctx
+        generator = self._CommandGenerator()
+        func = getattr(generator, method)
+        return func(auth, target, *args, lookupNames=False, lookupValues=False)
 
-    return None
+    def get(self, ctx: Tuple[Any, Any], oid: str) -> Any:
+        err_indication, err_status, err_index, var_binds = self._run("getCmd", ctx, oid)
+        _raise_on_error(err_indication, err_status, err_index)
+        return var_binds[0][1]
+
+    def set(self, ctx: Tuple[Any, Any], oid: str, value: Any) -> None:
+        err_indication, err_status, err_index, _ = self._run(
+            "setCmd", ctx, (oid, value)
+        )
+        _raise_on_error(err_indication, err_status, err_index)
+
+    def walk(self, ctx: Tuple[Any, Any], oid: str) -> Iterable[Tuple[Any, Any]]:
+        auth, target = ctx
+        generator = self._CommandGenerator()
+        iterator = generator.nextCmd(
+            auth,
+            target,
+            oid,
+            lexicographicMode=False,
+            lookupNames=False,
+            lookupValues=False,
+        )
+        for err_indication, err_status, err_index, var_binds in iterator:
+            _raise_on_error(err_indication, err_status, err_index)
+            for item in var_binds:
+                yield item
 
 
-_HELPERS: Dict[str, Any] | None = None
-IMPORT_ERROR: Exception | None = None
+_BACKEND: _SnmpBackend | None = None
+_BACKEND_ERROR: Exception | None = None
 
 
-def _ensure_helpers() -> Dict[str, Any]:
-    """Ensure pysnmp helpers are available after requirements install."""
+def _get_backend() -> _SnmpBackend:
+    """Return a cached backend, discovering helpers if necessary."""
 
-    global _HELPERS, IMPORT_ERROR
+    global _BACKEND, _BACKEND_ERROR
 
-    if _HELPERS is not None:
-        return _HELPERS
+    if _BACKEND is not None:
+        return _BACKEND
+    if _BACKEND_ERROR is not None:
+        raise SnmpDependencyError(str(_BACKEND_ERROR)) from _BACKEND_ERROR
 
-    try:  # pragma: no cover - depends on runtime environment
-        helpers = _load_helper_symbols()
-    except SnmpDependencyError as err:  # pragma: no cover - handled by config flow
-        IMPORT_ERROR = err
-        raise
-    except Exception as err:  # pragma: no cover - defensive fallback
-        IMPORT_ERROR = err
-        raise SnmpDependencyError("pysnmp is not available") from err
+    first_error: Exception | None = None
 
-    IMPORT_ERROR = None
-    _HELPERS = helpers
-    return helpers
+    try:
+        backend = _HlapiBackend()
+    except SnmpDependencyError as err:
+        first_error = err
+    else:
+        _LOGGER.debug("Using pysnmp.hlapi backend")
+        _BACKEND = backend
+        return backend
+
+    try:
+        backend = _CmdGenBackend()
+    except SnmpDependencyError as err:
+        if first_error is not None:
+            combined = SnmpDependencyError(
+                f"pysnmp helpers unavailable: {first_error}; {err}"
+            )
+            _BACKEND_ERROR = combined
+            raise combined
+        _BACKEND_ERROR = err
+        raise err
+
+    _LOGGER.debug("Using pysnmp CommandGenerator backend")
+    _BACKEND = backend
+    return backend
 
 
 def _raise_on_error(err_indication, err_status, err_index) -> None:
@@ -217,33 +282,11 @@ class SwitchSnmpClient:
 
     def __init__(
         self,
-        helpers: Dict[str, Any],
-        host: str,
-        community: str,
-        port: int = 161,
+        backend: _SnmpBackend,
+        context: Any,
     ) -> None:
-        self._SnmpEngine = helpers["SnmpEngine"]
-        self._CommunityData = helpers["CommunityData"]
-        self._UdpTransportTarget = helpers["UdpTransportTarget"]
-        self._ContextData = helpers.get("ContextData")
-        self._ObjectType = helpers["ObjectType"]
-        self._ObjectIdentity = helpers["ObjectIdentity"]
-        self._getCmd = helpers["getCmd"]
-        self._nextCmd = helpers["nextCmd"]
-        self._setCmd = helpers["setCmd"]
-        self._Integer = helpers["Integer"]
-        self._OctetString = helpers["OctetString"]
-
-        self._host = host
-        self._community = community
-        self._port = port
-
-        self._engine = self._SnmpEngine()
-        self._auth = self._CommunityData(self._community, mpModel=1)
-        self._target = self._UdpTransportTarget(
-            (self._host, self._port), timeout=2.0, retries=3
-        )
-        self._context = self._ContextData() if self._ContextData is not None else None
+        self._backend = backend
+        self._ctx = context
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -252,25 +295,22 @@ class SwitchSnmpClient:
     ) -> "SwitchSnmpClient":
         """Build a client after loading pysnmp helpers off the event loop."""
 
-        helpers = await asyncio.to_thread(_ensure_helpers)
-        return cls(helpers, host, community, port)
+        backend = await asyncio.to_thread(_get_backend)
+        context = await asyncio.to_thread(backend.create_context, host, port, community)
+        return cls(backend, context)
 
     async def async_close(self) -> None:
         """Close the client (placeholder for parity with previous API)."""
 
-        return None
-
-    def _build_command_args(self) -> list[Any]:
-        args: list[Any] = [self._engine, self._auth, self._target]
-        if self._context is not None:
-            args.append(self._context)
-        return args
+        close = getattr(self._backend, "close", None)
+        if close is not None:
+            await asyncio.to_thread(close, self._ctx)
 
     async def _async_get_value(self, oid: str) -> Any:
         """Fetch a raw SNMP value while holding the shared lock."""
 
         async with self._lock:
-            return await asyncio.to_thread(self._sync_get_value, oid)
+            return await asyncio.to_thread(self._backend.get, self._ctx, oid)
 
     async def async_get(self, oid: str) -> str:
         """Perform an SNMP GET and return the value as a string."""
@@ -278,28 +318,12 @@ class SwitchSnmpClient:
         value = await self._async_get_value(oid)
         return _format_snmp_value(value)
 
-    def _sync_get_value(self, oid: str) -> Any:
-        args = self._build_command_args()
-        object_type = self._ObjectType(self._ObjectIdentity(oid))
-        iterator = self._getCmd(
-            *args,
-            object_type,
-            lookupNames=False,
-            lookupValues=False,
-        )
-        try:
-            err_indication, err_status, err_index, var_binds = next(iterator)
-        except StopIteration as err:  # pragma: no cover - defensive
-            raise SnmpError("SNMP GET returned no data") from err
-        _raise_on_error(err_indication, err_status, err_index)
-        return var_binds[0][1]
-
     async def async_set_admin_status(self, index: int, up: bool) -> None:
         """Set the administrative status of an interface."""
 
         base_oid = SNMP_OIDS.get("ifAdminStatus", "1.3.6.1.2.1.2.2.1.7")
         oid = f"{base_oid}.{index}"
-        value = self._Integer(1 if up else 2)
+        value = self._backend.make_integer(1 if up else 2)
         await self._async_set(oid, value)
 
     async def async_set_alias(self, index: int, alias: str) -> None:
@@ -307,27 +331,12 @@ class SwitchSnmpClient:
 
         base_oid = SNMP_OIDS.get("ifAlias", "1.3.6.1.2.1.31.1.1.1.18")
         oid = f"{base_oid}.{index}"
-        value = self._OctetString(alias)
+        value = self._backend.make_octet_string(alias)
         await self._async_set(oid, value)
 
     async def _async_set(self, oid: str, value: Any) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._sync_set, oid, value)
-
-    def _sync_set(self, oid: str, value: Any) -> None:
-        args = self._build_command_args()
-        object_type = self._ObjectType(self._ObjectIdentity(oid), value)
-        iterator = self._setCmd(
-            *args,
-            object_type,
-            lookupNames=False,
-            lookupValues=False,
-        )
-        try:
-            err_indication, err_status, err_index, _ = next(iterator)
-        except StopIteration as err:  # pragma: no cover - defensive
-            raise SnmpError("SNMP SET returned no data") from err
-        _raise_on_error(err_indication, err_status, err_index)
+            await asyncio.to_thread(self._backend.set, self._ctx, oid, value)
 
     async def async_get_table(self, oid: str) -> Dict[int, str]:
         """Fetch an SNMP table and return a dictionary keyed by index."""
@@ -339,32 +348,16 @@ class SwitchSnmpClient:
         result: Dict[int, str] = {}
         start_oid = oid
 
-        args = self._build_command_args()
-        object_type = self._ObjectType(self._ObjectIdentity(oid))
-        iterator = self._nextCmd(
-            *args,
-            object_type,
-            lexicographicMode=False,
-            lookupNames=False,
-            lookupValues=False,
-        )
-
-        for err_indication, err_status, err_index, var_binds in iterator:
-            _raise_on_error(err_indication, err_status, err_index)
-
-            if not var_binds:
+        for fetched_oid, value in self._backend.walk(self._ctx, oid):
+            fetched_oid_str = str(fetched_oid)
+            if not fetched_oid_str.startswith(start_oid):
+                break
+            try:
+                index = int(fetched_oid_str.split(".")[-1])
+            except ValueError:
+                _LOGGER.debug("Skipping non-integer OID %s", fetched_oid_str)
                 continue
-
-            for fetched_oid, value in var_binds:
-                fetched_oid_str = str(fetched_oid)
-                if not fetched_oid_str.startswith(start_oid):
-                    return result
-                try:
-                    index = int(fetched_oid_str.split(".")[-1])
-                except ValueError:
-                    _LOGGER.debug("Skipping non-integer OID %s", fetched_oid_str)
-                    continue
-                result[index] = _format_snmp_value(value)
+            result[index] = _format_snmp_value(value)
 
         return result
 
