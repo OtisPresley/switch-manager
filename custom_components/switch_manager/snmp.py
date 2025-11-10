@@ -78,7 +78,7 @@ IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"
 IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"
 
 SYS_DESCR = "1.3.6.1.2.1.1.1.0"
-SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
+SYS_UPTIME = "1.3.6.1.2.1.1.3.0"  # TimeTicks (hundredths of a second)
 SYS_NAME = "1.3.6.1.2.1.1.5.0"
 
 
@@ -134,7 +134,7 @@ def _snmp_get(host: str, port: int, community: str, oid: str) -> Optional[str]:
     auth = CommunityData(community, mpModel=1)
     target = UdpTransportTarget((host, port), timeout=2, retries=1)
     ctx = ContextData()
-    error_indication, error_status, error_index, var_binds = next(
+    error_indication, error_status, _error_index, var_binds = next(
         getCmd(engine, auth, target, ctx, ObjectType(ObjectIdentity(oid)))
     )
     if error_indication or error_status:
@@ -147,6 +147,29 @@ def _snmp_get(host: str, port: int, community: str, oid: str) -> Optional[str]:
 def _mask_to_prefix(mask: str) -> Optional[int]:
     try:
         return ipaddress.IPv4Network("0.0.0.0/" + mask, strict=False).prefixlen
+    except Exception:
+        return None
+
+
+def _parse_sysdescr(sys_descr: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Try to split sysDescr into (manufacturer+model, firmware).
+    Example:
+      "Dell EMC Networking N3048EP-ON, 6.7.1.31, Linux 4.14.174, v1.0.5"
+    -> ("Dell EMC Networking N3048EP-ON", "6.7.1.31")
+    """
+    if not sys_descr:
+        return None, None
+    parts = [p.strip() for p in sys_descr.split(",")]
+    manufacturer_model = parts[0] if parts else None
+    firmware = parts[1] if len(parts) > 1 else None
+    return manufacturer_model, firmware
+
+
+def _ticks_to_seconds(ticks: str) -> Optional[int]:
+    try:
+        # pysnmp prettyPrint() usually returns decimal string for TimeTicks
+        return int(ticks) // 100
     except Exception:
         return None
 
@@ -192,10 +215,23 @@ class SwitchSnmpClient:
 
     async def async_get_system_info(self) -> Dict[str, Optional[str]]:
         def _read():
+            sys_descr = _snmp_get(self._host, self._port, self._community, SYS_DESCR) or ""
+            sys_uptime = _snmp_get(self._host, self._port, self._community, SYS_UPTIME) or ""
+            sys_name = _snmp_get(self._host, self._port, self._community, SYS_NAME) or ""
+
+            manufacturer_model, firmware = _parse_sysdescr(sys_descr)
+            uptime_seconds = _ticks_to_seconds(sys_uptime)
+
+            # Keep both the raw and parsed keys so older/newer code paths work
             return {
-                "sysDescr": _snmp_get(self._host, self._port, self._community, SYS_DESCR) or "",
-                "sysUpTime": _snmp_get(self._host, self._port, self._community, SYS_UPTIME) or "",
-                "sysName": _snmp_get(self._host, self._port, self._community, SYS_NAME) or "",
+                "sysDescr": sys_descr,
+                "sysUpTime": sys_uptime,
+                "sysName": sys_name,
+                # Parsed/normalized fields used by sensor.py
+                "manufacturer_model": manufacturer_model,
+                "firmware": firmware,
+                "hostname": sys_name,
+                "uptime_seconds": uptime_seconds,
             }
 
         return await self._run(_read)
