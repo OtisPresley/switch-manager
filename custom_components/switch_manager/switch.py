@@ -236,6 +236,7 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
                 prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
                 out.append(f"{ipaddress.IPv4Address(addr)}/{prefix}")
             except Exception:
+                # keep going; we'll still expose ip_address/netmask below
                 continue
         return out
 
@@ -258,12 +259,19 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
             })
 
             ipv4 = port.get("ipv4") or []
+            # Always expose ip_address/netmask if we have them
+            if ipv4:
+                first = ipv4[0] or {}
+                if "address" in first and first.get("address"):
+                    attrs["ip_address"] = first.get("address")
+                if "netmask" in first and first.get("netmask"):
+                    attrs["netmask"] = first.get("netmask")
+
+            # Best-effort CIDR(s)
             cidrs = self._cidrs_from_ipv4_list(ipv4)
             if cidrs:
                 attrs["ip_cidr_primary"] = cidrs[0]
                 attrs["ipv4_cidrs"] = cidrs
-                attrs["ip_address"] = (ipv4[0] or {}).get("address")
-                attrs["netmask"] = (ipv4[0] or {}).get("netmask")
 
         # System-level attrs
         if sysinfo:
