@@ -66,7 +66,7 @@ def _short_intf_name(long_name: str, alias: str) -> str | None:
       'Unit: 1 Slot: 1 Port: 2 10G'      -> 'Te1/1/2'
     """
     text = long_name or ""
-    alt  = alias or ""
+    alt = alias or ""
 
     # VLANs – try name first, then alias
     for candidate in (text, alt):
@@ -81,7 +81,7 @@ def _short_intf_name(long_name: str, alias: str) -> str | None:
     unit, slot, port, tail = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
 
     t = tail.lower()
-    # 20G stacking ports -> Tw (per your request)
+    # 20G stacking ports -> Tw (per your note)
     if "20g" in t or "20 g" in t:
         itype = "Tw"
     elif "10g" in t or "ten" in t or "tengig" in t or "ten-gig" in t or "ten gig" in t:
@@ -89,18 +89,10 @@ def _short_intf_name(long_name: str, alias: str) -> str | None:
     elif "fast" in t or "100m" in t:
         itype = "Fa"
     else:
-        # Default to Gigabit for anything else mentioning 1G/gigabit/level text
+        # Default to Gigabit for anything else mentioning 1G/gigabit
         itype = "Gi"
 
     return f"{itype}{unit}/{slot}/{port}"
-
-
-def _cidr_from_addr_mask(addr: str, mask: str) -> str | None:
-    try:
-        prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
-        return f"{ipaddress.IPv4Address(addr)}/{prefix}"
-    except Exception:
-        return None
 
 
 def _should_exclude(name: str, alias: str, include: List[str], exclude: List[str]) -> bool:
@@ -131,8 +123,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Include/Exclude (comma-separated) from Options
     include_opt = (entry.options.get("include") or "").strip()
     exclude_opt = (entry.options.get("exclude") or "").strip()
-    include = [s.strip() for s in include_opt.split(",") if s.strip()] if include_opt else []
-    exclude = [s.strip() for s in exclude_opt.split(",") if exclude_opt else []]
+    include = [s.strip() for s in (include_opt.split(",") if include_opt else [])]
+    exclude = [s.strip() for s in (exclude_opt.split(",") if exclude_opt else [])]
 
     entities: list[SwitchManagerPort] = []
     iterable = ports.values() if isinstance(ports, dict) else ports
