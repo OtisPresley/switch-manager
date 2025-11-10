@@ -1,7 +1,7 @@
 """Constants for Switch Manager integration."""
 
 DOMAIN = "switch_manager"
-PLATFORMS = ["switch"]
+PLATFORMS = ["switch", "sensor"]  # add sensor so diagnostic entities load
 DEFAULT_PORT = 161
 CONF_COMMUNITY = "community"
 DEFAULT_SCAN_INTERVAL = 30
