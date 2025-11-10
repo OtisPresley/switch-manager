@@ -12,19 +12,35 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_coordinator(hass, entry):
-    """Return the DataUpdateCoordinator regardless of how it's stored."""
-    # Common pattern: hass.data[DOMAIN][entry_id] is a dict with "coordinator"
+    """Return the DataUpdateCoordinator regardless of storage shape."""
     dom: Dict[str, Any] | None = hass.data.get(DOMAIN)
+
+    # 1) Newest observed layout in your logs:
+    #    hass.data[DOMAIN] -> {"entries": { entry_id: {...} }, "service_registered": True}
+    if isinstance(dom, dict) and "entries" in dom:
+        entries = dom.get("entries")
+        if isinstance(entries, dict):
+            node = entries.get(entry.entry_id)
+            if node is not None:
+                if isinstance(node, dict) and "coordinator" in node:
+                    return node["coordinator"]
+                # Some code stores the coordinator object directly
+                if hasattr(node, "async_request_refresh") and hasattr(node, "data"):
+                    return node
+
+    # 2) Older common layouts
     if isinstance(dom, dict):
         node = dom.get(entry.entry_id)
         if node is not None:
             if isinstance(node, dict) and "coordinator" in node:
                 return node["coordinator"]
-            # Some integrations put the coordinator directly at the entry_id key
             if hasattr(node, "async_request_refresh") and hasattr(node, "data"):
                 return node
+        # Single-coordinator layout
+        if "coordinator" in dom and hasattr(dom["coordinator"], "async_request_refresh"):
+            return dom["coordinator"]
 
-    # Newer pattern: coordinator is attached to runtime_data
+    # 3) ConfigEntry runtime_data (some HA versions)
     runtime = getattr(entry, "runtime_data", None)
     if runtime is not None:
         if hasattr(runtime, "async_request_refresh") and hasattr(runtime, "data"):
@@ -32,12 +48,10 @@ def _resolve_coordinator(hass, entry):
         if hasattr(runtime, "coordinator"):
             return getattr(runtime, "coordinator")
 
-    # Last resort: log what's actually present to help debugging
     _LOGGER.error(
-        "Could not resolve coordinator for entry_id=%s; hass.data keys: %s; node=%s; runtime_data=%s",
+        "Could not resolve coordinator for entry_id=%s; hass.data keys: %s; node=None; runtime_data=%s",
         entry.entry_id,
         list((dom or {}).keys()) if isinstance(dom, dict) else type(dom).__name__,
-        (dom or {}).get(entry.entry_id) if isinstance(dom, dict) else None,
         type(runtime).__name__ if runtime is not None else None,
     )
     raise KeyError(entry.entry_id)
@@ -51,10 +65,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities: list[SwitchManagerPort] = []
 
     # Accept both dict[int, dict] and list[dict] or list[int]
-    if isinstance(ports, dict):
-        iterable = ports.values()
-    else:
-        iterable = ports
+    iterable = ports.values() if isinstance(ports, dict) else ports
 
     count = 0
     for port in iterable:
@@ -89,13 +100,11 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return True if port is administratively up (and ideally operational)."""
+        """Return True if port is administratively up."""
         ports = self.coordinator.data.get("ports", {})
         port = ports.get(self._port_index) if isinstance(ports, dict) else None
         if isinstance(port, dict):
             admin = port.get("admin")
-            oper = port.get("oper")
-            # Consider "on" when admin is up; oper up is a bonus
             return admin == 1
         return False
 
@@ -106,7 +115,6 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
             _LOGGER.error("No SNMP client available for port %s", self._port_index)
             return
         try:
-            # ifAdminStatus.<index> = up(1)
             await client.async_set_octet_string(
                 f"1.3.6.1.2.1.2.2.1.7.{self._port_index}", 1
             )
@@ -121,7 +129,6 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
             _LOGGER.error("No SNMP client available for port %s", self._port_index)
             return
         try:
-            # ifAdminStatus.<index> = down(2)
             await client.async_set_octet_string(
                 f"1.3.6.1.2.1.2.2.1.7.{self._port_index}", 2
             )
