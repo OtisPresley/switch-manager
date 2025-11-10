@@ -24,6 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 # --------------------------
 # pysnmp import + error types
 # --------------------------
+
 class SnmpError(HomeAssistantError):
     """Generic SNMP error for this integration."""
 
@@ -33,6 +34,7 @@ class SnmpDependencyError(SnmpError):
 
 
 try:
+    # pysnmp 4.x API (works with lextudio fork pinned by manifest/const)
     from pysnmp.hlapi import (
         CommunityData,
         ObjectIdentity,
@@ -49,9 +51,11 @@ except Exception as exc:  # pragma: no cover
     _PYSNMP_IMPORT_OK = False
     _PYSNMP_IMPORT_ERR = exc
 
+
 # --------------------------
 # Back-compat helper shims (used by config_flow and earlier code)
 # --------------------------
+
 def ensure_snmp_available() -> None:
     if not _PYSNMP_IMPORT_OK:
         raise SnmpDependencyError(f"pysnmp.hlapi import failed: {_PYSNMP_IMPORT_ERR}")
@@ -62,21 +66,23 @@ def validate_environment_or_raise() -> None:
 
 
 def reset_backend_cache() -> None:
+    # Nothing to do for pysnmp; left for older code paths that import it
     return
 
 
 # --- MIB-II OIDs (vendor-agnostic) ---
+
 IF_TABLE = "1.3.6.1.2.1.2.2.1"
 IF_DESCR = IF_TABLE + ".2"
 IF_TYPE = IF_TABLE + ".3"
 IF_ADMIN = IF_TABLE + ".7"
 IF_OPER = IF_TABLE + ".8"
 IF_LAST_CHANGE = IF_TABLE + ".9"
-IF_ALIAS = IF_TABLE + ".31"  # ifAlias (RFC2863)
+IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"  # RFC2863 ifAlias
 
 # IANA ifType values
-IANA_IFTYPE_LAG = 161                # ieee8023adLag
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
+IANA_IFTYPE_LAG = 161  # ieee8023adLag
 
 # IPv4 address table
 IP_ADDR_TABLE = "1.3.6.1.2.1.4.20.1"
@@ -91,13 +97,14 @@ SYS_NAME = "1.3.6.1.2.1.1.5.0"
 
 
 def _normalize_port_community(
-    port_in: Union[int, str, None], community_in: Union[str, int, None]
+    port_in: Union[int, str, None],
+    community_in: Union[str, int, None],
 ) -> Tuple[int, str]:
     """Accept either (port, community) or (community, port); ports can be str."""
     default_port = 161
 
+    # If first arg looks like a community (non-digit string), treat it as such.
     if isinstance(port_in, str) and not port_in.isdigit():
-        # port arg actually is community
         community = str(port_in)
         if isinstance(community_in, int):
             port = community_in
@@ -107,6 +114,7 @@ def _normalize_port_community(
             port = default_port
         return int(port), community
 
+    # Otherwise, first arg is a port (int or digit-string) or None
     if isinstance(port_in, str) and port_in.isdigit():
         port = int(port_in)
     elif isinstance(port_in, int):
@@ -115,7 +123,7 @@ def _normalize_port_community(
         port = default_port
 
     community = "" if community_in is None else str(community_in)
-    return port, community
+    return int(port), community
 
 
 def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tuple[str, object]]:
@@ -124,10 +132,15 @@ def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tupl
     auth = CommunityData(community, mpModel=1)  # v2c
     target = UdpTransportTarget((host, port), timeout=2, retries=1)
     ctx = ContextData()
-    out: List[Tuple[str, object]] = []
 
+    out: List[Tuple[str, object]] = []
     for (err_ind, err_stat, err_idx, var_binds) in nextCmd(
-        engine, auth, target, ctx, ObjectType(ObjectIdentity(base_oid)), lexicographicMode=False
+        engine,
+        auth,
+        target,
+        ctx,
+        ObjectType(ObjectIdentity(base_oid)),
+        lexicographicMode=False,
     ):
         if err_ind:
             raise SnmpError(f"SNMP walk error: {err_ind}")
@@ -145,6 +158,7 @@ def _snmp_get(host: str, port: int, community: str, oid: str) -> Optional[str]:
     auth = CommunityData(community, mpModel=1)  # v2c
     target = UdpTransportTarget((host, port), timeout=2, retries=1)
     ctx = ContextData()
+
     error_indication, error_status, error_index, var_binds = next(
         getCmd(engine, auth, target, ctx, ObjectType(ObjectIdentity(oid)))
     )
@@ -185,14 +199,19 @@ class SwitchSnmpClient:
     # ----- creation -----
     @classmethod
     async def async_create(
-        cls, hass: HomeAssistant, host: str, port_or_comm, comm_or_port=None
+        cls,
+        hass: HomeAssistant,
+        host: str,
+        port_or_comm,
+        comm_or_port=None,
     ) -> "SwitchSnmpClient":
         """Accept both call styles: (port, community) or (community, port)."""
         await hass.async_add_executor_job(ensure_snmp_available)
 
         # Detect which arg is which
         if isinstance(port_or_comm, str) and (
-            isinstance(comm_or_port, int) or (isinstance(comm_or_port, str) and comm_or_port.isdigit())
+            isinstance(comm_or_port, int)
+            or (isinstance(comm_or_port, str) and comm_or_port.isdigit())
         ):
             community = port_or_comm
             port = comm_or_port
@@ -239,10 +258,12 @@ class SwitchSnmpClient:
                     return None
 
             info: Dict[int, Dict] = {}
+
             for oid, val in descr_rows:
                 idx = _idx_from_oid(oid)
                 if idx is not None:
                     info.setdefault(idx, {})["descr"] = val
+
             for oid, val in type_rows:
                 idx = _idx_from_oid(oid)
                 if idx is not None:
@@ -250,6 +271,7 @@ class SwitchSnmpClient:
                         info.setdefault(idx, {})["type"] = int(val)
                     except Exception:
                         info.setdefault(idx, {})["type"] = None
+
             for oid, val in admin_rows:
                 idx = _idx_from_oid(oid)
                 if idx is not None:
@@ -257,6 +279,7 @@ class SwitchSnmpClient:
                         info.setdefault(idx, {})["admin"] = int(val)
                     except Exception:
                         info.setdefault(idx, {})["admin"] = None
+
             for oid, val in oper_rows:
                 idx = _idx_from_oid(oid)
                 if idx is not None:
@@ -264,10 +287,12 @@ class SwitchSnmpClient:
                         info.setdefault(idx, {})["oper"] = int(val)
                     except Exception:
                         info.setdefault(idx, {})["oper"] = None
+
             for oid, val in alias_rows:
                 idx = _idx_from_oid(oid)
                 if idx is not None:
                     info.setdefault(idx, {})["alias"] = val
+
             for oid, val in last_rows:
                 idx = _idx_from_oid(oid)
                 if idx is not None:
@@ -284,6 +309,7 @@ class SwitchSnmpClient:
             ip_to_ifidx: Dict[str, int] = {}
             ip_to_mask: Dict[str, str] = {}
 
+            # ifIndex part is in the OID suffix (the dotted IP itself)
             for oid, val in ifidx_rows:
                 suffix_ip = oid.split(".")[-4:]
                 try:
@@ -294,6 +320,7 @@ class SwitchSnmpClient:
                     ip_to_ifidx[key] = int(val)
                 except Exception:
                     continue
+
             for oid, mask in mask_rows:
                 suffix_ip = oid.split(".")[-4:]
                 try:
@@ -320,6 +347,7 @@ class SwitchSnmpClient:
                 last = row.get("last") or 0
                 has_ip = idx in ip_map
 
+                # Heuristic to drop unconfigured LAGs (no alias, no IP, never changed)
                 if if_type == IANA_IFTYPE_LAG and (not alias) and (not has_ip) and last == 0:
                     continue
 
