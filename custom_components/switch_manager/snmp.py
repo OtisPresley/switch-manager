@@ -50,44 +50,41 @@ except Exception as exc:  # pragma: no cover
     _PYSNMP_IMPORT_ERR = exc
 
 # --------------------------
-# Back-compat helper shims
+# Back-compat helper shims (used by config_flow and earlier code)
 # --------------------------
 def ensure_snmp_available() -> None:
-    """Compat shim used by config_flow; raises if pysnmp is not importable."""
     if not _PYSNMP_IMPORT_OK:
         raise SnmpDependencyError(f"pysnmp.hlapi import failed: {_PYSNMP_IMPORT_ERR}")
 
 
 def validate_environment_or_raise() -> None:
-    """Older code path alias."""
     ensure_snmp_available()
 
 
 def reset_backend_cache() -> None:
-    """Compat no-op used by earlier versions/tests."""
     return
 
 
 # --- MIB-II OIDs (vendor-agnostic) ---
-IF_TABLE = "1.3.6.1.2.1.2.2.1"          # ifTable.* columns
+IF_TABLE = "1.3.6.1.2.1.2.2.1"
 IF_DESCR = IF_TABLE + ".2"
 IF_TYPE = IF_TABLE + ".3"
 IF_ADMIN = IF_TABLE + ".7"
 IF_OPER = IF_TABLE + ".8"
 IF_LAST_CHANGE = IF_TABLE + ".9"
-IF_ALIAS = IF_TABLE + ".31"             # ifAlias (RFC2863)
+IF_ALIAS = IF_TABLE + ".31"  # ifAlias (RFC2863)
 
 # IANA ifType values
-IANA_IFTYPE_LAG = 161                   # ieee8023adLag
+IANA_IFTYPE_LAG = 161                # ieee8023adLag
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
 
-# IP address (IPv4) table (MIB-II)
+# IPv4 address table
 IP_ADDR_TABLE = "1.3.6.1.2.1.4.20.1"
-IP_AD_ENT_ADDR = IP_ADDR_TABLE + ".1"      # ipAdEntAddr (index: ip)
-IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"     # ipAdEntIfIndex (value: ifIndex)
-IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"   # ipAdEntNetMask
+IP_AD_ENT_ADDR = IP_ADDR_TABLE + ".1"
+IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"
+IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"
 
-# System info (for sensors)
+# System OIDs
 SYS_DESCR = "1.3.6.1.2.1.1.1.0"
 SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
 SYS_NAME = "1.3.6.1.2.1.1.5.0"
@@ -96,24 +93,20 @@ SYS_NAME = "1.3.6.1.2.1.1.5.0"
 def _normalize_port_community(
     port_in: Union[int, str, None], community_in: Union[str, int, None]
 ) -> Tuple[int, str]:
-    """
-    Accept either (port, community) or (community, port), strings or ints.
-    Defaults port to 161 if it's missing/unparseable.
-    """
+    """Accept either (port, community) or (community, port); ports can be str."""
     default_port = 161
 
-    # If port is a non-digit string, it is actually the community
     if isinstance(port_in, str) and not port_in.isdigit():
+        # port arg actually is community
         community = str(port_in)
-        port = community_in if isinstance(community_in, int) else default_port
+        if isinstance(community_in, int):
+            port = community_in
+        elif isinstance(community_in, str) and community_in.isdigit():
+            port = int(community_in)
+        else:
+            port = default_port
         return int(port), community
 
-    # If community is an int and port is None -> swap
-    if isinstance(community_in, int) and (port_in is None):
-        return int(community_in), ""
-
-    # Normal paths
-    port: int
     if isinstance(port_in, str) and port_in.isdigit():
         port = int(port_in)
     elif isinstance(port_in, int):
@@ -126,7 +119,6 @@ def _normalize_port_community(
 
 
 def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tuple[str, object]]:
-    """Walk an OID and return list of (oid, value)."""
     ensure_snmp_available()
     engine = SnmpEngine()
     auth = CommunityData(community, mpModel=1)  # v2c
@@ -175,9 +167,15 @@ def _mask_to_prefix(mask: str) -> Optional[int]:
 
 
 class SwitchSnmpClient:
-    """Very small pysnmp wrapper with only what the integration needs."""
+    """Tiny SNMP client tailored for the integration."""
 
-    def __init__(self, hass: Optional[HomeAssistant], host: str, port: Union[int, str, None], community: Union[str, int, None]) -> None:
+    def __init__(
+        self,
+        hass: Optional[HomeAssistant],
+        host: str,
+        port: Union[int, str, None],
+        community: Union[str, int, None],
+    ) -> None:
         self._hass = hass
         norm_port, norm_comm = _normalize_port_community(port, community)
         self._host = host
@@ -189,29 +187,22 @@ class SwitchSnmpClient:
     async def async_create(
         cls, hass: HomeAssistant, host: str, port_or_comm, comm_or_port=None
     ) -> "SwitchSnmpClient":
-        """
-        Accept both call styles:
-        - async_create(hass, host, port:int|str, community:str)
-        - async_create(hass, host, community:str, port:int|str)
-        """
+        """Accept both call styles: (port, community) or (community, port)."""
         await hass.async_add_executor_job(ensure_snmp_available)
 
-        # Try to detect which arg is which
-        port: Union[int, str, None]
-        community: Union[str, int, None]
-
-        # If first of the two is str and second is int-like -> it is (community, port)
-        if isinstance(port_or_comm, str) and (isinstance(comm_or_port, int) or (isinstance(comm_or_port, str) and comm_or_port.isdigit())):
+        # Detect which arg is which
+        if isinstance(port_or_comm, str) and (
+            isinstance(comm_or_port, int) or (isinstance(comm_or_port, str) and comm_or_port.isdigit())
+        ):
             community = port_or_comm
             port = comm_or_port
         else:
-            # assume (port, community)
             port = port_or_comm
             community = comm_or_port
 
         return cls(hass, host, port, community)
 
-    # Small helper to run sync SNMP in executor no matter how we’re called
+    # run sync job on executor (works even if hass not set)
     async def _run(self, func, *args):
         if self._hass is not None:
             return await self._hass.async_add_executor_job(func, *args)
@@ -230,7 +221,7 @@ class SwitchSnmpClient:
 
     # ----- interface listing with IPv4 attribution -----
     async def async_get_interfaces(self) -> List[Dict]:
-        """Return list of interfaces with admin/oper/alias/descr/type + IPv4 info."""
+        """Return list of interface dicts with admin/oper/alias/descr/type + IPv4 info."""
 
         def _collect() -> List[Dict]:
             # Walk ifTable essentials
@@ -241,7 +232,6 @@ class SwitchSnmpClient:
             alias_rows = _snmp_walk(self._host, self._port, self._community, IF_ALIAS)
             last_rows = _snmp_walk(self._host, self._port, self._community, IF_LAST_CHANGE)
 
-            # Build by ifIndex
             def _idx_from_oid(oid: str) -> Optional[int]:
                 try:
                     return int(oid.split(".")[-1])
@@ -294,7 +284,6 @@ class SwitchSnmpClient:
             ip_to_ifidx: Dict[str, int] = {}
             ip_to_mask: Dict[str, str] = {}
 
-            # value of ipRows is the IP; for ifidx/mask we reconstruct the same IP from suffix
             for oid, val in ifidx_rows:
                 suffix_ip = oid.split(".")[-4:]
                 try:
@@ -315,7 +304,7 @@ class SwitchSnmpClient:
 
             ip_map: Dict[int, List[Tuple[str, str, Optional[int]]]] = {}
             for _oid, ip_val in ip_rows:
-                ip = ip_val  # already a dotted string from prettyPrint()
+                ip = ip_val
                 idx = ip_to_ifidx.get(ip)
                 if idx is None:
                     continue
@@ -323,7 +312,7 @@ class SwitchSnmpClient:
                 prefix = _mask_to_prefix(mask) if mask else None
                 ip_map.setdefault(idx, []).append((ip, mask, prefix))
 
-            # Build final rows + filter unused PortChannels (LAG) heuristically
+            # Build final rows + filter unconfigured PortChannels (heuristic)
             out: List[Dict] = []
             for idx, row in info.items():
                 if_type = row.get("type")
@@ -331,7 +320,6 @@ class SwitchSnmpClient:
                 last = row.get("last") or 0
                 has_ip = idx in ip_map
 
-                # Heuristic: skip unconfigured LAGs (no alias, no IP, no activity)
                 if if_type == IANA_IFTYPE_LAG and (not alias) and (not has_ip) and last == 0:
                     continue
 
@@ -349,3 +337,8 @@ class SwitchSnmpClient:
             return out
 
         return await self._run(_collect)
+
+    # ----- compatibility alias for existing __init__.py -----
+    async def async_get_port_data(self) -> List[Dict]:
+        """Backward-compatible name expected by __init__.py."""
+        return await self.async_get_interfaces()
