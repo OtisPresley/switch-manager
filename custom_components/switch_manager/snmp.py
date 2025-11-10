@@ -61,6 +61,7 @@ def reset_backend_cache() -> None:
     return
 
 
+# ---------- IF-MIB ----------
 IF_TABLE = "1.3.6.1.2.1.2.2.1"
 IF_DESCR = IF_TABLE + ".2"
 IF_TYPE = IF_TABLE + ".3"
@@ -72,11 +73,18 @@ IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
 IANA_IFTYPE_LAG = 161  # ieee8023adLag
 
+# ---------- IP-MIB v1 (legacy) ----------
 IP_ADDR_TABLE = "1.3.6.1.2.1.4.20.1"
 IP_AD_ENT_ADDR = IP_ADDR_TABLE + ".1"
 IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"
 IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"
 
+# ---------- IP-MIB v2 (RFC 4293) ----------
+# INDEX { ipAddressAddrType(1=v4), ipAddressAddr }
+IP2_IFINDEX = "1.3.6.1.2.1.4.34.1.3"
+IP2_PREFIXLEN = "1.3.6.1.2.1.4.34.1.5"
+
+# ---------- SYSTEM ----------
 SYS_DESCR = "1.3.6.1.2.1.1.1.0"
 SYS_UPTIME = "1.3.6.1.2.1.1.3.0"  # TimeTicks (hundredths of a second)
 SYS_NAME = "1.3.6.1.2.1.1.5.0"
@@ -151,27 +159,46 @@ def _mask_to_prefix(mask: str) -> Optional[int]:
         return None
 
 
-def _parse_sysdescr(sys_descr: str) -> Tuple[Optional[str], Optional[str]]:
+def _parse_sysdescr(sys_descr: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Try to split sysDescr into (manufacturer+model, firmware).
+    Return (manufacturer_model, manufacturer, model) using safe heuristics.
     Example:
       "Dell EMC Networking N3048EP-ON, 6.7.1.31, Linux 4.14.174, v1.0.5"
-    -> ("Dell EMC Networking N3048EP-ON", "6.7.1.31")
+    -> ("Dell EMC Networking N3048EP-ON", "Dell EMC Networking", "N3048EP-ON")
     """
     if not sys_descr:
-        return None, None
-    parts = [p.strip() for p in sys_descr.split(",")]
-    manufacturer_model = parts[0] if parts else None
-    firmware = parts[1] if len(parts) > 1 else None
-    return manufacturer_model, firmware
+        return None, None, None
+    first = sys_descr.split(",")[0].strip()
+    manufacturer_model = first or None
+
+    manufacturer = None
+    model = None
+    # Heuristic: last token that contains a digit (e.g., "N3048EP-ON") is the model
+    tokens = first.split()
+    for tok in reversed(tokens):
+        if any(ch.isdigit() for ch in tok):
+            model = tok
+            manufacturer = first[: first.rfind(tok)].strip() or None
+            break
+    return manufacturer_model, manufacturer, model
 
 
 def _ticks_to_seconds(ticks: str) -> Optional[int]:
     try:
-        # pysnmp prettyPrint() usually returns decimal string for TimeTicks
         return int(ticks) // 100
     except Exception:
         return None
+
+
+def _format_seconds_human(seconds: Optional[int]) -> Optional[str]:
+    if seconds is None:
+        return None
+    d, r = divmod(seconds, 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
+    if d:
+        return f"{d} days, {h:02d}:{m:02d}:{s:02d}"
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 class SwitchSnmpClient:
@@ -219,19 +246,22 @@ class SwitchSnmpClient:
             sys_uptime = _snmp_get(self._host, self._port, self._community, SYS_UPTIME) or ""
             sys_name = _snmp_get(self._host, self._port, self._community, SYS_NAME) or ""
 
-            manufacturer_model, firmware = _parse_sysdescr(sys_descr)
+            manufacturer_model, manufacturer, model = _parse_sysdescr(sys_descr)
             uptime_seconds = _ticks_to_seconds(sys_uptime)
+            uptime_human = _format_seconds_human(uptime_seconds)
 
-            # Keep both the raw and parsed keys so older/newer code paths work
+            # Keep raw fields + friendly fallbacks used by sensor.py
             return {
                 "sysDescr": sys_descr,
                 "sysUpTime": sys_uptime,
                 "sysName": sys_name,
-                # Parsed/normalized fields used by sensor.py
                 "manufacturer_model": manufacturer_model,
-                "firmware": firmware,
+                "manufacturer": manufacturer,
+                "model": model,
+                "firmware": (sys_descr.split(",")[1].strip() if "," in sys_descr else None),
                 "hostname": sys_name,
                 "uptime_seconds": uptime_seconds,
+                "uptime": uptime_human,  # human-readable
             }
 
         return await self._run(_read)
@@ -290,7 +320,7 @@ class SwitchSnmpClient:
                     except Exception:
                         info.setdefault(i, {})["last"] = None
 
-            # IPv4 ipAddrTable
+            # ---------- IPv4 from IP-MIB v1 ----------
             ip_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_ADDR)
             ifidx_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_IFIDX)
             mask_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_NETMASK)
@@ -321,11 +351,58 @@ class SwitchSnmpClient:
             for _oid, ip_val in ip_rows:
                 ip = ip_val
                 idx = ip_to_ifidx.get(ip)
-                if idx is None:
-                    continue
-                mask = ip_to_mask.get(ip, "")
-                prefix = _mask_to_prefix(mask) if mask else None
-                ip_map.setdefault(idx, []).append((ip, mask, prefix))
+                if idx is not None:
+                    mask = ip_to_mask.get(ip, "")
+                    prefix = _mask_to_prefix(mask) if mask else None
+                    ip_map.setdefault(idx, []).append((ip, mask, prefix))
+
+            # ---------- IPv4 from IP-MIB v2 (RFC 4293) ----------
+            try:
+                v2_ifidx = _snmp_walk(self._host, self._port, self._community, IP2_IFINDEX)
+                v2_plen = _snmp_walk(self._host, self._port, self._community, IP2_PREFIXLEN)
+
+                # Build map: index key is "<addrType>.<octets...>"
+                # Only take addrType==1 (IPv4). Some stacks omit a length byte; handle both.
+                def _key_tail(oid: str) -> Optional[str]:
+                    try:
+                        tail = oid.split(".")[-5:]  # try last 5: [1, a, b, c, d]
+                        if tail and tail[0] == "1":
+                            return ".".join(tail)  # "1.a.b.c.d"
+                        tail = oid.split(".")[-6:]  # tolerant variant
+                        if tail and tail[0] == "1":
+                            return ".".join(tail[-5:])  # still "1.a.b.c.d"
+                    except Exception:
+                        pass
+                    return None
+
+                key_to_ifidx: Dict[str, int] = {}
+                key_to_plen: Dict[str, int] = {}
+                for oid, val in v2_ifidx:
+                    k = _key_tail(oid)
+                    if not k:
+                        continue
+                    try:
+                        key_to_ifidx[k] = int(val)
+                    except Exception:
+                        continue
+                for oid, val in v2_plen:
+                    k = _key_tail(oid)
+                    if not k:
+                        continue
+                    try:
+                        key_to_plen[k] = int(val)
+                    except Exception:
+                        continue
+
+                for k, ifidx in key_to_ifidx.items():
+                    parts = k.split(".")[1:]  # drop the leading "1"
+                    if len(parts) == 4:
+                        ip = ".".join(parts)
+                        prefix = key_to_plen.get(k)
+                        ip_map.setdefault(ifidx, []).append((ip, "", prefix))
+            except Exception:
+                # If device does not implement v2 table we silently ignore
+                pass
 
             # Build, filter: unconfigured LAGs and CPU interface (heuristic)
             out: List[Dict] = []
