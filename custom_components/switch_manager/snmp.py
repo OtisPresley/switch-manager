@@ -7,8 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-# Note: we purposefully import the classic sync hlapi from pysnmp for broad HA compatibility.
-# Do NOT switch to pysnmp v7 objects here; HA still ships 4.x in many containers.
+# We use the classic pysnmp HLAPI for broad HA compatibility.
 try:
     from pysnmp.hlapi import (
         CommunityData,
@@ -20,12 +19,32 @@ try:
         getCmd,
         nextCmd,
     )
+    _PYSNMP_IMPORT_OK = True
 except Exception as exc:  # pragma: no cover
-    raise HomeAssistantError(f"pysnmp.hlapi import failed: {exc}")
+    _PYSNMP_IMPORT_OK = False
+    _PYSNMP_IMPORT_ERR = exc
 
 _LOGGER = logging.getLogger(__name__)
 
-# --- MIB-II OIDs we use (vendor-agnostic) ---
+# --------------------------
+# Back-compat helper shims
+# --------------------------
+
+def ensure_snmp_available() -> None:
+    """Compat shim used by config_flow; raises if pysnmp is not importable."""
+    if not _PYSNMP_IMPORT_OK:
+        raise HomeAssistantError(f"pysnmp.hlapi import failed: {_PYSNMP_IMPORT_ERR}")
+
+def validate_environment_or_raise() -> None:
+    """Older code path alias."""
+    ensure_snmp_available()
+
+def reset_backend_cache() -> None:
+    """Compat no-op used by earlier versions/tests."""
+    return
+
+
+# --- MIB-II OIDs (vendor-agnostic) ---
 IF_TABLE = "1.3.6.1.2.1.2.2.1"          # ifTable.* columns
 IF_INDEX = IF_TABLE + ".1"
 IF_DESCR = IF_TABLE + ".2"
@@ -38,15 +57,15 @@ IF_OPER = IF_TABLE + ".8"
 IF_LAST_CHANGE = IF_TABLE + ".9"
 IF_ALIAS = IF_TABLE + ".31"             # ifAlias (RFC2863)
 
-# LAG ifType value per IANAifType = 161 (ieee8023adLag)
-IANA_IFTYPE_LAG = 161
+# IANA ifType values
+IANA_IFTYPE_LAG = 161                   # ieee8023adLag
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
 
 # IP address (IPv4) table (MIB-II)
 IP_ADDR_TABLE = "1.3.6.1.2.1.4.20.1"
-IP_AD_ENT_ADDR = IP_ADDR_TABLE + ".1"   # ipAdEntAddr (index: ip)
-IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"  # ipAdEntIfIndex (value: ifIndex)
-IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"  # ipAdEntNetMask
+IP_AD_ENT_ADDR = IP_ADDR_TABLE + ".1"      # ipAdEntAddr (index: ip)
+IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"     # ipAdEntIfIndex (value: ifIndex)
+IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"   # ipAdEntNetMask
 
 # System info (for sensors)
 SYS_DESCR = "1.3.6.1.2.1.1.1.0"
@@ -56,6 +75,7 @@ SYS_NAME = "1.3.6.1.2.1.1.5.0"
 
 def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tuple[str, object]]:
     """Walk an OID and return list of (oid, value)."""
+    ensure_snmp_available()
     engine = SnmpEngine()
     auth = CommunityData(community, mpModel=1)  # v2c
     target = UdpTransportTarget((host, port), timeout=2, retries=1)
@@ -78,6 +98,7 @@ def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tupl
 
 
 def _snmp_get(host: str, port: int, community: str, oid: str) -> Optional[str]:
+    ensure_snmp_available()
     engine = SnmpEngine()
     auth = CommunityData(community, mpModel=1)  # v2c
     target = UdpTransportTarget((host, port), timeout=2, retries=1)
@@ -114,7 +135,8 @@ class SwitchSnmpClient:
     # ----- creation -----
     @classmethod
     async def async_create(cls, hass: HomeAssistant, host: str, port: int, community: str) -> "SwitchSnmpClient":
-        # Just build the client; all SNMP I/O happens in executor jobs.
+        # Make sure pysnmp can load before we proceed.
+        await hass.async_add_executor_job(ensure_snmp_available)
         return cls(host, port, community)
 
     # ----- system info for sensors -----
@@ -133,7 +155,7 @@ class SwitchSnmpClient:
 
     # ----- interface listing with IPv4 attribution -----
     async def async_get_interfaces(self, hass: HomeAssistant) -> List[Dict]:
-        """Return list of interfaces with admin/oper/alisa/descr/type + IPv4 info."""
+        """Return list of interfaces with admin/oper/alias/descr/type + IPv4 info."""
         def _collect() -> List[Dict]:
             # Walk ifTable essentials
             descr_rows = _snmp_walk(self._host, self._port, self._community, IF_DESCR)
@@ -193,39 +215,37 @@ class SwitchSnmpClient:
             ifidx_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_IFIDX)
             mask_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_NETMASK)
 
-            # Indexing for ipAddrTable: the IP address is part of the OID suffix
-            # We'll assemble by reading all three tables into maps keyed by IP.
-            ip_to_ip: Dict[str, str] = {}
             ip_to_ifidx: Dict[str, int] = {}
             ip_to_mask: Dict[str, str] = {}
 
-            for oid, ipval in ip_rows:
-                # ipval is the IP (string)
-                ip_to_ip[ipval] = ipval
-            for oid, ifidx in ifidx_rows:
-                # suffix is the same IP; value is the ifIndex
-                suffix_ip = oid.split(".")[-4:]  # last four components
+            # value of ipRows is the IP; for ifidx/mask we reconstruct the same IP from suffix
+            for oid, val in ifidx_rows:
+                suffix_ip = oid.split(".")[-4:]
                 try:
-                    ip_key = ".".join([str(int(x)) for x in suffix_ip])
+                    key = ".".join(str(int(x)) for x in suffix_ip)
                 except Exception:
                     continue
                 try:
-                    ip_to_ifidx[ip_key] = int(ifidx)
+                    ip_to_ifidx[key] = int(val)
                 except Exception:
                     continue
             for oid, mask in mask_rows:
                 suffix_ip = oid.split(".")[-4:]
                 try:
-                    ip_key = ".".join([str(int(x)) for x in suffix_ip])
+                    key = ".".join(str(int(x)) for x in suffix_ip)
                 except Exception:
                     continue
-                ip_to_mask[ip_key] = mask
+                ip_to_mask[key] = mask
 
             ip_map: Dict[int, List[Tuple[str, str, Optional[int]]]] = {}
-            for ip_key, idx in ip_to_ifidx.items():
-                mask = ip_to_mask.get(ip_key)
+            for ip_oid, ip_val in ip_rows:
+                ip = ip_val  # already a dotted string from prettyPrint()
+                idx = ip_to_ifidx.get(ip)
+                if idx is None:
+                    continue
+                mask = ip_to_mask.get(ip, "")
                 prefix = _mask_to_prefix(mask) if mask else None
-                ip_map.setdefault(idx, []).append((ip_key, mask or "", prefix))
+                ip_map.setdefault(idx, []).append((ip, mask, prefix))
 
             # Build final rows + filter unused PortChannels (LAG) heuristically
             out: List[Dict] = []
