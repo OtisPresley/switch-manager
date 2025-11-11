@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-# Only safe hlapi objects are imported at module scope.
+# Safe-at-import hlapi symbols only
 from pysnmp.hlapi import (
     CommunityData,
     ContextData,
@@ -18,6 +18,12 @@ from pysnmp.hlapi import (
 _LOGGER = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
+# Public constants used by switch.py
+# -----------------------------------------------------------------------------
+# IANA ifType(24) == softwareLoopback
+IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
+
+# -----------------------------------------------------------------------------
 # Exceptions / dependency guard (public names preserved)
 # -----------------------------------------------------------------------------
 
@@ -30,11 +36,16 @@ class SnmpError(RuntimeError):
 
 
 def ensure_snmp_available() -> None:
-    """Raise SnmpDependencyError if pysnmp can't be initialized."""
+    """
+    Lightweight dependency check.
+
+    Do NOT instantiate SnmpEngine() here (that touches filesystem and
+    triggers HA's "blocking call" warning inside the event loop).
+    """
     try:
-        _ = SnmpEngine()
+        import pysnmp.hlapi as _  # noqa: F401
     except Exception as exc:  # pragma: no cover
-        raise SnmpDependencyError(f"pysnmp.hlapi unavailable: {exc}") from exc
+        raise SnmpDependencyError(f"pysnmp.hlapi import failed: {exc}") from exc
 
 
 # -----------------------------------------------------------------------------
@@ -53,7 +64,7 @@ IF_ADMIN = "1.3.6.1.2.1.2.2.1.7"
 IF_OPER  = "1.3.6.1.2.1.2.2.1.8"
 IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 
-# Legacy IP-MIB (IPv4) — broadly supported on switches
+# Legacy IP-MIB (IPv4) — broadly supported
 IP_ADDR    = "1.3.6.1.2.1.4.20.1.1"  # ipAdEntAddr
 IP_IFINDEX = "1.3.6.1.2.1.4.20.1.2"  # ipAdEntIfIndex
 IP_NETMASK = "1.3.6.1.2.1.4.20.1.3"  # ipAdEntNetMask
@@ -172,6 +183,7 @@ class SwitchSnmpClient:
 
     @classmethod
     async def async_create(cls, hass, host: str, port: int, community: str) -> "SwitchSnmpClient":
+        # Lightweight import check; does not block the event loop
         ensure_snmp_available()
         return cls(hass, host, port, community)
 
@@ -215,7 +227,7 @@ class SwitchSnmpClient:
         return await self._hass.async_add_executor_job(_read)
 
     async def async_get_port_data(self) -> List[Dict[str, Any]]:
-        """Return an array of interface dicts (indexes stable with your code)."""
+        """Return an array of interface dicts."""
 
         def _collect() -> List[Dict[str, Any]]:
             descr_rows = _snmp_walk(self._host, self._port, self._community, IF_DESCR)
@@ -234,7 +246,6 @@ class SwitchSnmpClient:
             oper  = { _idx(oid): int(val) for oid, val in oper_rows  if _idx(oid) is not None }
             alias = { _idx(oid): val     for oid, val in alias_rows if _idx(oid) is not None }
 
-            # IPv4 enrichment
             idx_to_ips = _build_ip_index_map(self._host, self._port, self._community)
 
             ports: List[Dict[str, Any]] = []
@@ -266,7 +277,7 @@ class SwitchSnmpClient:
 
         def _write() -> None:
             try:
-                # Lazy import — works across pysnmp variants
+                # Lazy import for cross-version compatibility
                 try:
                     from pysnmp.hlapi import Integer  # type: ignore
                 except Exception:  # pragma: no cover
@@ -292,7 +303,6 @@ class SwitchSnmpClient:
 
         def _write() -> None:
             try:
-                # Lazy import — avoid module-scope dependency on rfc1902
                 try:
                     from pysnmp.hlapi import OctetString  # type: ignore
                 except Exception:  # pragma: no cover
