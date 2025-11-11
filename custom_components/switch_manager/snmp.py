@@ -1,309 +1,440 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
-from pysnmp.hlapi import (  # pinned via manifest/const
-    CommunityData,
-    ContextData,
-    ObjectIdentity,
-    ObjectType,
-    SnmpEngine,
-    UdpTransportTarget,
-    getCmd,
-    nextCmd,
-)
-from pysnmp.smi.rfc1902 import Integer
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+
+__all__ = [
+    "SnmpError",
+    "SnmpDependencyError",
+    "ensure_snmp_available",
+    "validate_environment_or_raise",
+    "reset_backend_cache",
+    "SwitchSnmpClient",
+    "IANA_IFTYPE_LAG",
+    "IANA_IFTYPE_SOFTWARE_LOOPBACK",
+]
 
 _LOGGER = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# Exceptions / dependency check (names kept exactly as before)
-# -----------------------------------------------------------------------------
 
-class SnmpDependencyError(RuntimeError):
-    """Raised when pysnmp cannot be used at runtime."""
+class SnmpError(HomeAssistantError):
+    """Generic SNMP error for this integration."""
 
 
-class SnmpError(RuntimeError):
-    """Generic SNMP runtime error."""
+class SnmpDependencyError(SnmpError):
+    """Raised when pysnmp is not available."""
+
+
+try:
+    from pysnmp.hlapi import (
+        CommunityData,
+        ObjectIdentity,
+        ObjectType,
+        SnmpEngine,
+        UdpTransportTarget,
+        ContextData,
+        getCmd,
+        nextCmd,
+    )
+    _PYSNMP_IMPORT_OK = True
+    _PYSNMP_IMPORT_ERR = None
+except Exception as exc:  # pragma: no cover
+    _PYSNMP_IMPORT_OK = False
+    _PYSNMP_IMPORT_ERR = exc
 
 
 def ensure_snmp_available() -> None:
-    """Raise SnmpDependencyError if pysnmp is not usable."""
-    try:
-        _ = SnmpEngine()
-    except Exception as exc:  # pragma: no cover
-        raise SnmpDependencyError(f"pysnmp.hlapi import failed: {exc}") from exc
+    if not _PYSNMP_IMPORT_OK:
+        raise SnmpDependencyError(f"pysnmp.hlapi import failed: {_PYSNMP_IMPORT_ERR}")
 
 
-# -----------------------------------------------------------------------------
-# OIDs (same families you were using)
-# -----------------------------------------------------------------------------
+def validate_environment_or_raise() -> None:
+    ensure_snmp_available()
 
-# SNMPv2-MIB (system)
-SYS_DESCR = "1.3.6.1.2.1.1.1.0"
-SYS_NAME = "1.3.6.1.2.1.1.5.0"
-SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
 
-# IF-MIB
-IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
-IF_SPEED = "1.3.6.1.2.1.2.2.1.5"
-IF_ADMIN = "1.3.6.1.2.1.2.2.1.7"
-IF_OPER = "1.3.6.1.2.1.2.2.1.8"
+def reset_backend_cache() -> None:
+    return
+
+
+# ---------- IF-MIB ----------
+IF_TABLE = "1.3.6.1.2.1.2.2.1"
+IF_DESCR = IF_TABLE + ".2"
+IF_TYPE = IF_TABLE + ".3"
+IF_ADMIN = IF_TABLE + ".7"
+IF_OPER = IF_TABLE + ".8"
+IF_LAST_CHANGE = IF_TABLE + ".9"
 IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 
-# Legacy IP-MIB (IPv4) — widely supported and sufficient for SVIs/loopback
-IP_ADDR    = "1.3.6.1.2.1.4.20.1.1"  # ipAdEntAddr
-IP_IFINDEX = "1.3.6.1.2.1.4.20.1.2"  # ipAdEntIfIndex
-IP_NETMASK = "1.3.6.1.2.1.4.20.1.3"  # ipAdEntNetMask
+IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
+IANA_IFTYPE_LAG = 161  # ieee8023adLag
+
+# ---------- IP-MIB v1 (legacy) ----------
+IP_ADDR_TABLE = "1.3.6.1.2.1.4.20.1"
+IP_AD_ENT_ADDR = IP_ADDR_TABLE + ".1"
+IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"
+IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"
+
+# ---------- IP-MIB v2 (RFC 4293) ----------
+# INDEX { ipAddressAddrType(1=v4), ipAddressAddr }
+IP2_IFINDEX = "1.3.6.1.2.1.4.34.1.3"
+IP2_PREFIXLEN = "1.3.6.1.2.1.4.34.1.5"
+
+# ---------- SYSTEM ----------
+SYS_DESCR = "1.3.6.1.2.1.1.1.0"
+SYS_UPTIME = "1.3.6.1.2.1.1.3.0"  # TimeTicks (hundredths of a second)
+SYS_NAME = "1.3.6.1.2.1.1.5.0"
 
 
-# -----------------------------------------------------------------------------
-# Internal helpers (kept local; no public contract changes)
-# -----------------------------------------------------------------------------
+def _normalize_port_community(
+    port_in: Union[int, str, None], community_in: Union[str, int, None]
+) -> Tuple[int, str]:
+    default_port = 161
+    if isinstance(port_in, str) and not port_in.isdigit():
+        community = str(port_in)
+        if isinstance(community_in, int):
+            port = community_in
+        elif isinstance(community_in, str) and community_in.isdigit():
+            port = int(community_in)
+        else:
+            port = default_port
+        return int(port), community
+
+    if isinstance(port_in, str) and port_in.isdigit():
+        port = int(port_in)
+    elif isinstance(port_in, int):
+        port = port_in
+    else:
+        port = default_port
+
+    community = "" if community_in is None else str(community_in)
+    return int(port), community
+
+
+def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tuple[str, object]]:
+    ensure_snmp_available()
+    engine = SnmpEngine()
+    auth = CommunityData(community, mpModel=1)
+    target = UdpTransportTarget((host, port), timeout=2, retries=1)
+    ctx = ContextData()
+
+    out: List[Tuple[str, object]] = []
+    for (err_ind, err_stat, err_idx, var_binds) in nextCmd(
+        engine, auth, target, ctx, ObjectType(ObjectIdentity(base_oid)), lexicographicMode=False
+    ):
+        if err_ind:
+            raise SnmpError(f"SNMP walk error: {err_ind}")
+        if err_stat:
+            raise SnmpError(f"SNMP walk error: {err_stat.prettyPrint()} at {err_idx}")
+        for var_bind in var_binds:
+            oid, val = var_bind
+            out.append((str(oid), val.prettyPrint()))
+    return out
+
 
 def _snmp_get(host: str, port: int, community: str, oid: str) -> Optional[str]:
-    try:
-        engine = SnmpEngine()
-        target = UdpTransportTarget((host, port), timeout=2, retries=1)
-        cdata = CommunityData(community, mpModel=1)  # SNMPv2c
-        ctx = ContextData()
-        error_indication, error_status, _, var_binds = next(
-            getCmd(engine, cdata, target, ctx, ObjectType(ObjectIdentity(oid)))
-        )
-        if error_indication or error_status:
-            return None
-        for _, val in var_binds:
-            return str(val.prettyPrint())
-    except Exception as exc:  # pragma: no cover
-        _LOGGER.debug("SNMP get error (%s): %s", oid, exc)
+    ensure_snmp_available()
+    engine = SnmpEngine()
+    auth = CommunityData(community, mpModel=1)
+    target = UdpTransportTarget((host, port), timeout=2, retries=1)
+    ctx = ContextData()
+    error_indication, error_status, _error_index, var_binds = next(
+        getCmd(engine, auth, target, ctx, ObjectType(ObjectIdentity(oid)))
+    )
+    if error_indication or error_status:
+        return None
+    for vb in var_binds:
+        return vb[1].prettyPrint()
     return None
 
 
-def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tuple[str, str]]:
-    """Return [(oid, value), ...] under base_oid."""
-    rows: List[Tuple[str, str]] = []
+def _mask_to_prefix(mask: str) -> Optional[int]:
     try:
-        engine = SnmpEngine()
-        target = UdpTransportTarget((host, port), timeout=2, retries=1)
-        cdata = CommunityData(community, mpModel=1)
-        ctx = ContextData()
-        for (err_ind, err_stat, _, vbs) in nextCmd(
-            engine,
-            cdata,
-            target,
-            ctx,
-            ObjectType(ObjectIdentity(base_oid)),
-            lexicographicMode=False,
-        ):
-            if err_ind or err_stat:
-                break
-            for name, val in vbs:
-                rows.append((str(name.prettyPrint()), str(val.prettyPrint())))
-    except Exception as exc:  # pragma: no cover
-        _LOGGER.debug("SNMP walk error (%s): %s", base_oid, exc)
-    return rows
-
-
-# --- IPv4 adornment (surgical) ------------------------------------------------
-
-def _mask_to_prefix(mask: Optional[str]) -> Optional[int]:
-    if not mask:
-        return None
-    try:
-        octs = [int(x) for x in mask.split(".")]
-        if len(octs) != 4 or any(o < 0 or o > 255 for o in octs):
-            return None
-        bits = "".join(f"{o:08b}" for o in octs)
-        return bits.count("1")
+        return ipaddress.IPv4Network("0.0.0.0/" + mask, strict=False).prefixlen
     except Exception:
         return None
 
 
-def _format_ip_display(ips: List[Tuple[str, Optional[str], Optional[int]]]) -> Optional[str]:
-    """Use the first IP for a simple 'a.b.c.d/yy' (or just IP) attribute."""
-    if not ips:
+def _parse_sysdescr(sys_descr: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Return (manufacturer_model, manufacturer, model) using safe heuristics.
+    Example:
+      "Dell EMC Networking N3048EP-ON, 6.7.1.31, Linux 4.14.174, v1.0.5"
+    -> ("Dell EMC Networking N3048EP-ON", "Dell EMC Networking", "N3048EP-ON")
+    """
+    if not sys_descr:
+        return None, None, None
+    first = sys_descr.split(",")[0].strip()
+    manufacturer_model = first or None
+
+    manufacturer = None
+    model = None
+    # Heuristic: last token that contains a digit (e.g., "N3048EP-ON") is the model
+    tokens = first.split()
+    for tok in reversed(tokens):
+        if any(ch.isdigit() for ch in tok):
+            model = tok
+            manufacturer = first[: first.rfind(tok)].strip() or None
+            break
+    return manufacturer_model, manufacturer, model
+
+
+def _ticks_to_seconds(ticks: str) -> Optional[int]:
+    try:
+        return int(ticks) // 100
+    except Exception:
         return None
-    ip, mask, pfx = ips[0]
-    if pfx is None:
-        pfx = _mask_to_prefix(mask)
-    return f"{ip}/{pfx}" if pfx is not None else ip
 
 
-def _build_ip_index_map(
-    host: str,
-    port: int,
-    community: str,
-) -> Dict[int, List[Tuple[str, Optional[str], Optional[int]]]]:
-    """
-    Legacy IPv4 table → { ifIndex: [(ip, mask, prefix_or_None), ...] }.
-    """
-    addr_rows = _snmp_walk(host, port, community, IP_ADDR)
-    ifidx_rows = _snmp_walk(host, port, community, IP_IFINDEX)
-    mask_rows = _snmp_walk(host, port, community, IP_NETMASK)
+def _format_seconds_human(seconds: Optional[int]) -> Optional[str]:
+    if seconds is None:
+        return None
+    d, r = divmod(seconds, 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
+    if d:
+        return f"{d} days, {h:02d}:{m:02d}:{s:02d}"
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
-    def _ip_from_oid(oid: str, base: str) -> Optional[str]:
-        try:
-            return ".".join(oid.split(".")[len(base.split(".")) :])
-        except Exception:
-            return None
-
-    ip_to_ifidx: Dict[str, int] = {}
-    ip_to_mask: Dict[str, str] = {}
-
-    for oid, val in ifidx_rows:
-        ip = _ip_from_oid(oid, IP_IFINDEX)
-        if ip:
-            try:
-                ip_to_ifidx[ip] = int(val)
-            except Exception:
-                pass
-
-    for oid, val in mask_rows:
-        ip = _ip_from_oid(oid, IP_NETMASK)
-        if ip:
-            ip_to_mask[ip] = val
-
-    idx_to_ips: Dict[int, List[Tuple[str, Optional[str], Optional[int]]]] = {}
-    for _, ip in addr_rows:
-        if ip in ip_to_ifidx:
-            idx = ip_to_ifidx[ip]
-            mask = ip_to_mask.get(ip)
-            idx_to_ips.setdefault(idx, []).append((ip, mask, None))
-
-    return idx_to_ips
-
-
-# -----------------------------------------------------------------------------
-# Client (public names/signatures kept exactly the same)
-# -----------------------------------------------------------------------------
 
 class SwitchSnmpClient:
-    """Thin SNMP client used by coordinator/sensors."""
+    """Minimal SNMP wrapper for the integration."""
 
-    def __init__(self, hass, host: str, port: int, community: str) -> None:
+    def __init__(
+        self,
+        hass: Optional[HomeAssistant],
+        host: str,
+        port: Union[int, str, None],
+        community: Union[str, int, None],
+    ) -> None:
         self._hass = hass
+        norm_port, norm_comm = _normalize_port_community(port, community)
         self._host = host
-        self._port = port
-        self._community = community
+        self._port = norm_port
+        self._community = norm_comm
 
     @classmethod
-    async def async_create(cls, hass, host: str, port: int, community: str) -> "SwitchSnmpClient":
-        ensure_snmp_available()
+    async def async_create(
+        cls, hass: HomeAssistant, host: str, port_or_comm, comm_or_port=None
+    ) -> "SwitchSnmpClient":
+        await hass.async_add_executor_job(ensure_snmp_available)
+
+        if isinstance(port_or_comm, str) and (
+            isinstance(comm_or_port, int) or (isinstance(comm_or_port, str) and comm_or_port.isdigit())
+        ):
+            community = port_or_comm
+            port = comm_or_port
+        else:
+            port = port_or_comm
+            community = comm_or_port
+
         return cls(hass, host, port, community)
 
-    async def async_get_system_info(self) -> Dict[str, Any]:
-        """Return system details for sensors (unchanged keys)."""
+    async def _run(self, func, *args):
+        if self._hass is not None:
+            return await self._hass.async_add_executor_job(func, *args)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: func(*args))
 
-        def _read() -> Dict[str, Any]:
+    async def async_get_system_info(self) -> Dict[str, Optional[str]]:
+        def _read():
             sys_descr = _snmp_get(self._host, self._port, self._community, SYS_DESCR) or ""
-            sys_name = _snmp_get(self._host, self._port, self._community, SYS_NAME) or ""
             sys_uptime = _snmp_get(self._host, self._port, self._community, SYS_UPTIME) or ""
+            sys_name = _snmp_get(self._host, self._port, self._community, SYS_NAME) or ""
 
-            firmware = ""
-            manufacturer_model = sys_descr
-            try:
-                parts = [p.strip() for p in sys_descr.split(",")]
-                if len(parts) >= 2:
-                    manufacturer_model = parts[0]
-                    firmware = parts[1]
-            except Exception:
-                pass
+            manufacturer_model, manufacturer, model = _parse_sysdescr(sys_descr)
+            uptime_seconds = _ticks_to_seconds(sys_uptime)
+            uptime_human = _format_seconds_human(uptime_seconds)
 
-            human = ""
-            try:
-                # Timeticks: (341184840) 39 days, 11:44:08.40
-                if "days" in sys_uptime or ":" in sys_uptime:
-                    human = sys_uptime.split(")")[1].strip() if ")" in sys_uptime else sys_uptime
-                else:
-                    human = sys_uptime
-            except Exception:
-                human = sys_uptime
-
+            # Keep raw fields + friendly fallbacks used by sensor.py
             return {
                 "sysDescr": sys_descr,
-                "hostname": sys_name,
-                "firmware": firmware,
+                "sysUpTime": sys_uptime,
+                "sysName": sys_name,
                 "manufacturer_model": manufacturer_model,
-                "uptime_human": human,
-                "uptime_ticks": sys_uptime,
+                "manufacturer": manufacturer,
+                "model": model,
+                "firmware": (sys_descr.split(",")[1].strip() if "," in sys_descr else None),
+                "hostname": sys_name,
+                "uptime_seconds": uptime_seconds,
+                "uptime": uptime_human,  # human-readable
             }
 
-        return await self._hass.async_add_executor_job(_read)
+        return await self._run(_read)
 
-    async def async_get_port_data(self) -> List[Dict[str, Any]]:
-        """
-        Return list of port dicts; keys preserved from your working build:
-          index, descr, alias, admin, oper, plus:
-          - ips: [(ip, mask, None), ...]
-          - ip_display: 'a.b.c.d/yy'   (if derivable)
-        """
-
-        def _collect() -> List[Dict[str, Any]]:
+    async def async_get_interfaces(self) -> List[Dict]:
+        """Return list of interface dicts with admin/oper/alias/descr/type + IPv4 info."""
+        def _collect() -> List[Dict]:
             descr_rows = _snmp_walk(self._host, self._port, self._community, IF_DESCR)
+            type_rows = _snmp_walk(self._host, self._port, self._community, IF_TYPE)
             admin_rows = _snmp_walk(self._host, self._port, self._community, IF_ADMIN)
-            oper_rows  = _snmp_walk(self._host, self._port, self._community, IF_OPER)
+            oper_rows = _snmp_walk(self._host, self._port, self._community, IF_OPER)
             alias_rows = _snmp_walk(self._host, self._port, self._community, IF_ALIAS)
+            last_rows = _snmp_walk(self._host, self._port, self._community, IF_LAST_CHANGE)
 
-            def _idx(oid: str) -> Optional[int]:
+            def _idx_from_oid(oid: str) -> Optional[int]:
                 try:
                     return int(oid.split(".")[-1])
                 except Exception:
                     return None
 
-            descr = { _idx(oid): val for oid, val in descr_rows if _idx(oid) is not None }
-            admin = { _idx(oid): int(val) for oid, val in admin_rows if _idx(oid) is not None }
-            oper  = { _idx(oid): int(val) for oid, val in oper_rows  if _idx(oid) is not None }
-            alias = { _idx(oid): val for oid, val in alias_rows if _idx(oid) is not None }
+            info: Dict[int, Dict] = {}
+            for oid, val in descr_rows:
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    info.setdefault(i, {})["descr"] = val
+            for oid, val in type_rows:
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    try:
+                        info.setdefault(i, {})["type"] = int(val)
+                    except Exception:
+                        info.setdefault(i, {})["type"] = None
+            for oid, val in admin_rows:
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    try:
+                        info.setdefault(i, {})["admin"] = int(val)
+                    except Exception:
+                        info.setdefault(i, {})["admin"] = None
+            for oid, val in oper_rows:
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    try:
+                        info.setdefault(i, {})["oper"] = int(val)
+                    except Exception:
+                        info.setdefault(i, {})["oper"] = None
+            for oid, val in alias_rows:
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    info.setdefault(i, {})["alias"] = val
+            for oid, val in last_rows:
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    try:
+                        info.setdefault(i, {})["last"] = int(val)
+                    except Exception:
+                        info.setdefault(i, {})["last"] = None
 
-            # IP adornment (NEW; does not change existing keys)
-            idx_to_ips = _build_ip_index_map(self._host, self._port, self._community)
+            # ---------- IPv4 from IP-MIB v1 ----------
+            ip_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_ADDR)
+            ifidx_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_IFIDX)
+            mask_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_NETMASK)
 
-            ports: List[Dict[str, Any]] = []
-            for idx in sorted(descr.keys()):
-                # Skip CPU interface (not user configurable)
-                if idx == 661:
+            ip_to_ifidx: Dict[str, int] = {}
+            ip_to_mask: Dict[str, str] = {}
+
+            for oid, val in ifidx_rows:
+                parts = oid.split(".")[-4:]
+                try:
+                    ip = ".".join(str(int(p)) for p in parts)
+                except Exception:
+                    continue
+                try:
+                    ip_to_ifidx[ip] = int(val)
+                except Exception:
                     continue
 
-                p: Dict[str, Any] = {
-                    "index": idx,
-                    "descr": descr.get(idx, ""),
-                    "alias": alias.get(idx),
-                    "admin": admin.get(idx),
-                    "oper":  oper.get(idx),
-                }
+            for oid, mask in mask_rows:
+                parts = oid.split(".")[-4:]
+                try:
+                    ip = ".".join(str(int(p)) for p in parts)
+                except Exception:
+                    continue
+                ip_to_mask[ip] = mask
 
-                ips = idx_to_ips.get(idx, [])
-                if ips:
-                    p["ips"] = ips
-                    disp = _format_ip_display(ips)
-                    if disp:
-                        p["ip_display"] = disp
+            ip_map: Dict[int, List[Tuple[str, str, Optional[int]]]] = {}
+            for _oid, ip_val in ip_rows:
+                ip = ip_val
+                idx = ip_to_ifidx.get(ip)
+                if idx is not None:
+                    mask = ip_to_mask.get(ip, "")
+                    prefix = _mask_to_prefix(mask) if mask else None
+                    ip_map.setdefault(idx, []).append((ip, mask, prefix))
 
-                ports.append(p)
-
-            return ports
-
-        return await self._hass.async_add_executor_job(_collect)
-
-    async def async_set_admin_state(self, if_index: int, admin_up: bool) -> None:
-        """Set ifAdminStatus (requires write community on device)."""
-        value = 1 if admin_up else 2
-
-        def _write() -> None:
+            # ---------- IPv4 from IP-MIB v2 (RFC 4293) ----------
             try:
-                engine = SnmpEngine()
-                target = UdpTransportTarget((self._host, self._port), timeout=2, retries=1)
-                cdata = CommunityData(self._community, mpModel=1)
-                ctx = ContextData()
-                oid = f"{IF_ADMIN}.{if_index}"
-                err_ind, err_stat, _, _ = next(
-                    getCmd(engine, cdata, target, ctx, ObjectType(ObjectIdentity(oid), Integer(value)))
-                )
-                if err_ind or err_stat:
-                    _LOGGER.debug("SNMP set ifAdminStatus failed: %s %s", err_ind, err_stat)
-            except Exception as exc:  # pragma: no cover
-                _LOGGER.debug("SNMP set error: %s", exc)
+                v2_ifidx = _snmp_walk(self._host, self._port, self._community, IP2_IFINDEX)
+                v2_plen = _snmp_walk(self._host, self._port, self._community, IP2_PREFIXLEN)
 
-        await self._hass.async_add_executor_job(_write)
+                # Build map: index key is "<addrType>.<octets...>"
+                # Only take addrType==1 (IPv4). Some stacks omit a length byte; handle both.
+                def _key_tail(oid: str) -> Optional[str]:
+                    try:
+                        tail = oid.split(".")[-5:]  # try last 5: [1, a, b, c, d]
+                        if tail and tail[0] == "1":
+                            return ".".join(tail)  # "1.a.b.c.d"
+                        tail = oid.split(".")[-6:]  # tolerant variant
+                        if tail and tail[0] == "1":
+                            return ".".join(tail[-5:])  # still "1.a.b.c.d"
+                    except Exception:
+                        pass
+                    return None
+
+                key_to_ifidx: Dict[str, int] = {}
+                key_to_plen: Dict[str, int] = {}
+                for oid, val in v2_ifidx:
+                    k = _key_tail(oid)
+                    if not k:
+                        continue
+                    try:
+                        key_to_ifidx[k] = int(val)
+                    except Exception:
+                        continue
+                for oid, val in v2_plen:
+                    k = _key_tail(oid)
+                    if not k:
+                        continue
+                    try:
+                        key_to_plen[k] = int(val)
+                    except Exception:
+                        continue
+
+                for k, ifidx in key_to_ifidx.items():
+                    parts = k.split(".")[1:]  # drop the leading "1"
+                    if len(parts) == 4:
+                        ip = ".".join(parts)
+                        prefix = key_to_plen.get(k)
+                        ip_map.setdefault(ifidx, []).append((ip, "", prefix))
+            except Exception:
+                # If device does not implement v2 table we silently ignore
+                pass
+
+            # Build, filter: unconfigured LAGs and CPU interface (heuristic)
+            out: List[Dict] = []
+            for idx, row in info.items():
+                if_type = row.get("type")
+                descr = row.get("descr") or ""
+                alias = (row.get("alias") or "").strip()
+                last = row.get("last") or 0
+                has_ip = idx in ip_map
+
+                # drop unconfigured PortChannels
+                if if_type == IANA_IFTYPE_LAG and not alias and not has_ip and last == 0:
+                    continue
+
+                # drop CPU interface (common pattern: descr contains 'CPU' and has no IP/alias)
+                if ("cpu" in descr.lower()) and not alias and not has_ip:
+                    continue
+
+                out.append(
+                    {
+                        "index": idx,
+                        "descr": descr,
+                        "alias": alias,
+                        "admin": row.get("admin"),
+                        "oper": row.get("oper"),
+                        "type": if_type,
+                        "ips": ip_map.get(idx, []),  # [(ip, mask, prefix)]
+                    }
+                )
+            return out
+
+        return await self._run(_collect)
+
+    async def async_get_port_data(self) -> List[Dict]:
+        return await self.async_get_interfaces()
