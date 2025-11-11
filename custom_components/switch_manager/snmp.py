@@ -201,24 +201,62 @@ class SwitchSnmpClient:
             self.cache["ifTable"].setdefault(idx, {})["oper"] = int(val)
 
     async def _async_walk_ipv4(self) -> None:
-        ip_to_index: Dict[str, int | None] = {}
-        ip_to_mask: Dict[str, str] = {}
+        """
+        Populate IPv4 maps for attributes.
 
-        for _oid, val in await self._async_walk(OID_ipAdEntAddr):
-            ip_to_index[str(val)] = None
+        1) Try legacy IP-MIB ipAdEnt* (keeps existing behavior).
+        2) If legacy is empty, derive IPs *directly from the OID index* of
+           ipAddressIfIndex (1.3.6.1.2.1.4.34.1.3) which on this device looks like:
+             ...4.34.1.3.1.4.<a>.<b>.<c>.<d> = INTEGER: <ifIndex>
+           (afi=1, length=4, then 4 octets)
+        We intentionally do NOT compute masks here.
+        """
+        ip_index: Dict[str, int] = {}
+        ip_mask: Dict[str, str] = {}  # unchanged unless legacy provides it
 
-        for oid, val in await self._async_walk(OID_ipAdEntIfIndex):
-            parts = oid.split(".")[-4:]
-            ip = ".".join(parts)
-            ip_to_index[ip] = int(val)
+        # ---- (1) Legacy table: ipAdEnt* ----
+        legacy_addrs = await self._async_walk(OID_ipAdEntAddr)
+        if legacy_addrs:
+            for _oid, val in legacy_addrs:
+                ip_index[str(val)] = None  # type: ignore[assignment]
 
-        for oid, val in await self._async_walk(OID_ipAdEntNetMask):
-            parts = oid.split(".")[-4:]
-            ip = ".".join(parts)
-            ip_to_mask[ip] = str(val)
+            for oid, val in await self._async_walk(OID_ipAdEntIfIndex):
+                parts = oid.split(".")[-4:]
+                ip = ".".join(parts)
+                try:
+                    ip_index[ip] = int(val)
+                except Exception:
+                    continue
 
-        self.cache["ipIndex"] = ip_to_index
-        self.cache["ipMask"] = ip_to_mask
+            for oid, val in await self._async_walk(OID_ipAdEntNetMask):
+                parts = oid.split(".")[-4:]
+                ip = ".".join(parts)
+                ip_mask[ip] = str(val)
+
+            self.cache["ipIndex"] = ip_index
+            self.cache["ipMask"] = ip_mask
+            return
+
+        # ---- (2) Modern fallback: parse ip from the OID of ipAddressIfIndex only ----
+        OID_ipAddressIfIndex = "1.3.6.1.2.1.4.34.1.3"
+
+        for oid, val in await self._async_walk(OID_ipAddressIfIndex):
+            # oid suffix format on your device: ".1.4.a.b.c.d"
+            #   1 = IPv4 AFI, 4 = length, then 4 octets of the address
+            try:
+                suffix = oid[len(OID_ipAddressIfIndex) + 1 :]  # drop "1.3.6...4.34.1.3."
+                parts = [int(x) for x in suffix.split(".")]
+                if len(parts) >= 6 and parts[0] == 1 and parts[1] == 4:
+                    a, b, c, d = parts[2], parts[3], parts[4], parts[5]
+                    ip = f"{a}.{b}.{c}.{d}"
+                    ip_index[ip] = int(val)
+            except Exception:
+                continue
+
+        # Store only what we found; leave ipMask untouched
+        if ip_index:
+            self.cache["ipIndex"] = ip_index
+        # do not set self.cache["ipMask"] here on purpose
 
     async def set_alias(self, if_index: int, alias: str) -> bool:
         ok = await self.hass.async_add_executor_job(
