@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from homeassistant.core import HomeAssistant
+
 
 # -------------------------------------------------------------------
 # Exceptions used by config_flow
@@ -106,7 +107,8 @@ class SwitchSnmpClient:
         self._hass = hass
         self._host = host
         self._port = port
-        self._community_str = community  # <— renamed to avoid shadowing the method
+        # IMPORTANT: use _community_str so we never shadow a helper method
+        self._community_str = community
 
     @classmethod
     async def async_create(
@@ -252,3 +254,33 @@ class SwitchSnmpClient:
             return out
 
         return await self._hass.async_add_executor_job(_read)
+
+    # ------------------------------ adapter (NEW) ----------------------------------
+    async def async_get_port_data(self) -> List[Dict[str, Any]]:
+        """
+        Adapter expected by the existing coordinator/platform.
+
+        Returns a list of dicts with keys:
+          - index, name, alias, admin, oper, iftype
+          - ip  (CIDR)
+          - ip_address (same CIDR, for backward compatibility)
+        """
+        ports = await self.async_get_ports()
+        ip_map = await self.async_get_ipv4_map()
+
+        out: List[Dict[str, Any]] = []
+        for p in ports:
+            ip = ip_map.get(p.index)
+            item: Dict[str, Any] = {
+                "index": p.index,
+                "name": p.name,
+                "alias": p.alias,
+                "admin": p.admin,
+                "oper": p.oper,
+                "iftype": p.iftype,
+            }
+            if ip:
+                item["ip"] = ip
+                item["ip_address"] = ip
+            out.append(item)
+        return out
