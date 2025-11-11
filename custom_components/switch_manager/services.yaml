@@ -1,13 +1,11 @@
+
 set_port_description:
   name: Set port description
-  description: Update the alias/description for a switch port.
+  description: Update a switch port's ifAlias/description via SNMP
   fields:
     entity_id:
-      required: true
-      selector:
-        entity:
-          domain: switch
+      description: Port switch entity
+      example: switch.core_switch_port_5
     description:
-      required: true
-      selector:
-        text:
+      description: New textual description for the port
+      example: Uplink to router
