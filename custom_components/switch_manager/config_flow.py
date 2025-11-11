@@ -1,80 +1,43 @@
-from __future__ import annotations
 
-import logging
-from typing import Any, Dict
+from __future__ import annotations
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_NAME
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import DOMAIN
-from .snmp import ensure_snmp_available, SwitchSnmpClient, SnmpDependencyError, SnmpError
+from .const import DOMAIN, CONF_COMMUNITY, DEFAULT_PORT
+from .snmp import test_connection, get_sysname
 
-_LOGGER = logging.getLogger(__name__)
+STEP_USER_DATA_SCHEMA = vol.Schema({
+    vol.Required(CONF_HOST): str,
+    vol.Required(CONF_COMMUNITY): str,
+    vol.Optional(CONF_PORT, default=DEFAULT_PORT): int,
+    vol.Optional(CONF_NAME): str,
+})
 
-# Form keys
-CONF_HOST = "host"
-CONF_PORT = "port"
-CONF_COMMUNITY = "community"
-
-DEFAULT_PORT = 161
-
-
-class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Config flow for Switch Manager."""
-
+class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
-    @staticmethod
-    def _schema() -> vol.Schema:
-        """Build the user form schema (no Name field)."""
-        return vol.Schema(
-            {
-                vol.Required(CONF_HOST): str,
-                vol.Required(CONF_COMMUNITY): str,
-                vol.Required(CONF_PORT, default=DEFAULT_PORT): vol.Coerce(int),
-            }
-        )
+    async def async_step_user(self, user_input=None) -> FlowResult:
+        errors = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST]
+            port = user_input.get(CONF_PORT, DEFAULT_PORT)
+            community = user_input[CONF_COMMUNITY]
 
-    async def async_step_user(self, user_input: Dict[str, Any] | None = None) -> FlowResult:
-        """Handle the initial step."""
-        errors: Dict[str, str] = {}
+            ok = await test_connection(self.hass, host, community, port)
+            if not ok:
+                errors["base"] = "cannot_connect"
+            else:
+                # Use sysName for device naming if available
+                sysname = await get_sysname(self.hass, host, community, port)
+                title = user_input.get(CONF_NAME) or sysname or host
 
-        if user_input is None:
-            # show the form
-            return self.async_show_form(step_id="user", data_schema=self._schema(), errors=errors)
+                await self.async_set_unique_id(f"{host}:{port}:{community}")
+                self._abort_if_unique_id_configured()
 
-        # Validate pysnmp availability early
-        try:
-            await self.hass.async_add_executor_job(ensure_snmp_available)
-        except SnmpDependencyError as exc:
-            _LOGGER.exception("pysnmp dependency issue: %s", exc)
-            errors["base"] = "pysnmp_missing"
-            return self.async_show_form(step_id="user", data_schema=self._schema(), errors=errors)
-
-        host: str = user_input[CONF_HOST]
-        community: str = user_input[CONF_COMMUNITY]
-        port: int = int(user_input[CONF_PORT])
-
-        # Try a lightweight probe to avoid creating dead entries
-        try:
-            client = await SwitchSnmpClient.async_create(self.hass, host, port, community)
-            await client.async_get_system_info()
-        except (SnmpError, Exception) as exc:  # keep same behavior as before
-            _LOGGER.warning("SNMP validation failed for %s:%s: %s", host, port, exc)
-            errors["base"] = "cannot_connect"
-            return self.async_show_form(step_id="user", data_schema=self._schema(), errors=errors)
-
-        # Unique ID = host:port
-        await self.async_set_unique_id(f"{host}:{port}")
-        self._abort_if_unique_id_configured()
-
-        return self.async_create_entry(
-            title=host,  # Displayed until device registry picks up hostname/sensors
-            data={
-                CONF_HOST: host,
-                CONF_COMMUNITY: community,
-                CONF_PORT: port,
-            },
-        )
+                return self.async_create_entry(title=title, data={
+                    "host": host, "port": port, "community": community, "name": title
+                })
+        return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors)
