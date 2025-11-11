@@ -6,7 +6,30 @@ from typing import Dict, List, Optional, Tuple
 
 from homeassistant.core import HomeAssistant
 
-# Import pysnmp symbols lazily & safely (no heavy work at import time)
+# -------------------------------------------------------------------
+# Exceptions requested/used by config_flow
+# -------------------------------------------------------------------
+class SnmpError(Exception):
+    """Generic SNMP runtime error."""
+
+
+class SnmpDependencyError(SnmpError):
+    """Raised when pysnmp (or required symbols) is unavailable."""
+
+
+# Explicit export list so names are guaranteed visible to importers
+__all__ = [
+    "SnmpError",
+    "SnmpDependencyError",
+    "ensure_snmp_available",
+    "SwitchSnmpClient",
+    "IANA_IFTYPE_SOFTWARE_LOOPBACK",
+    "IANA_IFTYPE_IEEE8023AD_LAG",
+]
+
+# -------------------------------------------------------------------
+# Lazy pysnmp imports (no heavy/IO work at import time)
+# -------------------------------------------------------------------
 try:
     from pysnmp.hlapi import (
         CommunityData,
@@ -19,14 +42,17 @@ try:
         nextCmd,
     )
 except Exception:  # pragma: no cover
+    # Keep module importable even if pysnmp is missing;
+    # config_flow will call ensure_snmp_available() and get a clean error.
     CommunityData = ContextData = ObjectIdentity = ObjectType = None  # type: ignore
     SnmpEngine = UdpTransportTarget = getCmd = nextCmd = None  # type: ignore
 
-
-# IANA ifType constants (used by switch.py and others)
+# -------------------------------------------------------------------
+# Constants
+# -------------------------------------------------------------------
+# IANA ifType values we reference from switch.py
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
 IANA_IFTYPE_IEEE8023AD_LAG = 161  # Port-Channel/LAG on many vendors
-
 
 # IF-MIB
 OID_IFDESCR = "1.3.6.1.2.1.2.2.1.2"
@@ -47,19 +73,11 @@ OID_SYS_NAME = "1.3.6.1.2.1.1.5.0"
 OID_SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
 
 
-# ---------------- Exceptions expected by config_flow ----------------
-class SnmpError(Exception):
-    """Generic SNMP runtime error."""
-
-
-class SnmpDependencyError(SnmpError):
-    """Raised when pysnmp (or required symbols) is unavailable."""
-
-
 # -------------------------------------------------------------------
-
+# Light-weight dependency probe used by config_flow
+# -------------------------------------------------------------------
 def _pysnmp_ok() -> bool:
-    """Return True if the pysnmp symbols we use are importable."""
+    """True if required pysnmp symbols are importable."""
     return all(
         (
             CommunityData,
@@ -76,16 +94,16 @@ def _pysnmp_ok() -> bool:
 
 def ensure_snmp_available() -> None:
     """
-    Lightweight probe used by config flow.
-
-    IMPORTANT: Keep this NON-BLOCKING. We only verify imports/symbols and
-    raise SnmpDependencyError if pysnmp isn't usable. Do NOT instantiate
-    SnmpEngine() or touch the filesystem here.
+    Verify pysnmp is importable. **No blocking work** here.
+    Raises SnmpDependencyError if missing.
     """
     if not _pysnmp_ok():
         raise SnmpDependencyError("pysnmp is not available")
 
 
+# -------------------------------------------------------------------
+# Data model
+# -------------------------------------------------------------------
 @dataclass
 class SwitchPort:
     index: int
@@ -96,8 +114,11 @@ class SwitchPort:
     iftype: int
 
 
+# -------------------------------------------------------------------
+# Client
+# -------------------------------------------------------------------
 class SwitchSnmpClient:
-    """Small SNMP helper. All blocking calls run in the executor."""
+    """Minimal SNMP client. All blocking calls run in executor threads."""
 
     def __init__(self, hass: HomeAssistant, host: str, port: int, community: str) -> None:
         self._hass = hass
@@ -109,11 +130,10 @@ class SwitchSnmpClient:
     async def async_create(
         cls, hass: HomeAssistant, host: str, port: int, community: str
     ) -> "SwitchSnmpClient":
-        # Keep config flow safe & fast
-        ensure_snmp_available()
+        ensure_snmp_available()  # keep config flow fast/safe
         return cls(hass, host, port, community)
 
-    # ----------------- low-level helpers (sync, called in executor) -----------------
+    # ----------------- low-level helpers (sync; called in executor) -----------------
     def _target(self) -> UdpTransportTarget:
         return UdpTransportTarget((self._host, self._port), timeout=2, retries=1)
 
@@ -160,9 +180,9 @@ class SwitchSnmpClient:
             sys_descr = self._get(OID_SYS_DESCR) or ""
             hostname = self._get(OID_SYS_NAME) or ""
             uptime_ticks = self._get(OID_SYS_UPTIME) or ""
+
             firmware = ""
             manuf_model = ""
-
             if sys_descr:
                 parts = [p.strip() for p in sys_descr.split(",")]
                 if parts:
@@ -209,7 +229,7 @@ class SwitchSnmpClient:
                     oper=int(oper.get(idx_str, "0") or 0),
                     iftype=int(iftype.get(idx_str, "0") or 0),
                 )
-                # Skip known CPU pseudo-ifIndex
+                # Skip known CPU pseudo-ifIndex on your hardware
                 if port.index == 661:
                     continue
                 out.append(port)
