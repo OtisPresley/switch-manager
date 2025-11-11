@@ -1,35 +1,13 @@
-"""SNMP helpers for Switch Manager (surgical update).
 
-What this provides (and is relied upon elsewhere):
-- Exceptions: SnmpError, SnmpDependencyError
-- reset_backend_cache()
-- class SwitchSnmpClient with:
-    async_create(host, community, port)
-    async_close()
-    async_get_system_info() -> dict
-    async_get_port_data()  -> list[PortRow]
-    async_set_alias(ifIndex, text)
-    async_set_admin_status(ifIndex, enabled)
-
-Surgical changes vs. prior iterations:
-- Signature of async_create(host, community, port) matches config_flow/__init__.
-- All pysnmp calls run in a thread executor to avoid blocking warnings.
-- Collect IPv4 + mask and render as CIDR; works with IPv4 ipAddrTable (legacy) and
-  tolerates devices lacking IP-MIBv2.
-- Skip CPU pseudo-interface (index 661).
-- Hide default/unconfigured Port-Channels (LAG) that have no alias and no IP.
-- Return uptime *seconds* (sensor formats to human string).
-"""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-import asyncio
+import logging
+from typing import Any, Dict, Optional
 
-# pysnmp 4.x HLAPI only (your manifest pins <5)
-from pysnmp.hlapi import (
-    SnmpEngine,
+from homeassistant.core import HomeAssistant
+from pysnmp.hlapi.asyncio import (
     CommunityData,
+    SnmpEngine,
     UdpTransportTarget,
     ContextData,
     ObjectType,
@@ -37,285 +15,134 @@ from pysnmp.hlapi import (
     getCmd,
     nextCmd,
     setCmd,
-    Integer,
-    OctetString,
+)
+from pysnmp.proto.rfc1902 import OctetString, Integer
+
+from .const import (
+    OID_sysDescr, OID_sysName, OID_sysUpTime,
+    OID_ifIndex, OID_ifDescr, OID_ifAdminStatus, OID_ifOperStatus, OID_ifName, OID_ifAlias,
+    OID_ipAdEntAddr, OID_ipAdEntIfIndex, OID_ipAdEntNetMask,
 )
 
-# ---- Exceptions kept for callers -------------------------------------------------
-class SnmpError(Exception):
-    """Generic SNMP error."""
+_LOGGER = logging.getLogger(__name__)
 
-
-class SnmpDependencyError(SnmpError):
-    """Raised if pysnmp is not available/usable."""
-
-
-def reset_backend_cache() -> None:
-    """Compatibility shim used by config_flow/__init__ (no-op)."""
-    return
-
-
-# ---- IANA ifType values used by switch.py ---------------------------------------
-IANA_IFTYPE_ETHERNET_CSMACD = 6
-IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
-IANA_IFTYPE_IEEE8023AD_LAG = 161
-
-# Some stacks expose a CPU pseudo-interface; skip it.
-CPU_IFINDEX = 661
-
-# ---- Small synchronous SNMP helpers (run in executor) ---------------------------
-
-
-def _snmp_walk(host: str, port: int, community: str, oid: str) -> List[Tuple[str, str]]:
-    """Basic walk returning (oid, value) as strings."""
-    engine = SnmpEngine()
-    out: List[Tuple[str, str]] = []
-    for (err_ind, err_stat, err_idx, var_binds) in nextCmd(
-        engine,
-        CommunityData(community, mpModel=1),  # v2c
-        UdpTransportTarget((host, port), timeout=2, retries=1),
-        ContextData(),
-        ObjectType(ObjectIdentity(oid)),
-        lexicographicMode=False,
-    ):
-        if err_ind:
-            raise SnmpError(str(err_ind))
-        if err_stat:
-            raise SnmpError(f"{err_stat.prettyPrint()} at {err_idx}")
-        for vb in var_binds:
-            out.append((str(vb[0]), str(vb[1])))
-    return out
-
-
-def _snmp_get(host: str, port: int, community: str, oid: str) -> Optional[str]:
-    """Basic get returning the pretty-printed value or None."""
-    engine = SnmpEngine()
-    err_ind, err_stat, err_idx, var_binds = next(
-        getCmd(
-            engine,
-            CommunityData(community, mpModel=1),
-            UdpTransportTarget((host, port), timeout=2, retries=1),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-        )
-    )
-    if err_ind:
-        raise SnmpError(str(err_ind))
-    if err_stat:
-        raise SnmpError(f"{err_stat.prettyPrint()} at {err_idx}")
-    return str(var_binds[0][1]) if var_binds else None
-
-
-def _snmp_set_octetstring(host: str, port: int, community: str, oid: str, text: str) -> None:
-    engine = SnmpEngine()
-    err_ind, err_stat, err_idx, _ = next(
-        setCmd(
-            engine,
-            CommunityData(community, mpModel=1),
-            UdpTransportTarget((host, port), timeout=2, retries=1),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid), OctetString(text)),
-        )
-    )
-    if err_ind:
-        raise SnmpError(str(err_ind))
-    if err_stat:
-        raise SnmpError(f"{err_stat.prettyPrint()} at {err_idx}")
-
-
-def _snmp_set_integer(host: str, port: int, community: str, oid: str, value: int) -> None:
-    engine = SnmpEngine()
-    err_ind, err_stat, err_idx, _ = next(
-        setCmd(
-            engine,
-            CommunityData(community, mpModel=1),
-            UdpTransportTarget((host, port), timeout=2, retries=1),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid), Integer(value)),
-        )
-    )
-    if err_ind:
-        raise SnmpError(str(err_ind))
-    if err_stat:
-        raise SnmpError(f"{err_stat.prettyPrint()} at {err_idx}")
-
-
-def _mask_to_prefix(mask: str) -> int:
-    try:
-        return sum(bin(int(o)).count("1") for o in mask.split("."))
-    except Exception:
-        return 0
-
-
-# ---- Public data structures ------------------------------------------------------
-@dataclass
-class PortRow:
-    index: int
-    name: str
-    alias: str
-    admin: int
-    oper: int
-    iftype: int
-    ip_cidr: Optional[str] = None
-
-
-# ---- Client ---------------------------------------------------------------------
 class SwitchSnmpClient:
-    """Simple SNMP client; all network work is offloaded to a thread."""
+    def __init__(self, hass: HomeAssistant, host: str, community: str, port: int) -> None:
+        self.hass = hass
+        self.host = host
+        self.community = community
+        self.port = port
+        self.engine = SnmpEngine()
+        self.target = UdpTransportTarget((host, port), timeout=1.5, retries=1)
+        self.community_data = CommunityData(community, mpModel=1)  # v2c
+        self.context = ContextData()
 
-    def __init__(self, host: str, community: str, port: int) -> None:
-        self._host = host
-        self._community = community
-        self._port = port
+        self.cache: Dict[str, Any] = {
+            "sysDescr": None,
+            "sysName": None,
+            "sysUpTime": None,
+            "ifTable": {},     # index -> dict
+            "ipIndex": {},     # ip -> ifIndex
+            "ipMask": {},      # ip -> netmask
+        }
 
-    # factory used by config_flow/__init__
-    @classmethod
-    async def async_create(cls, host: str, community: str, port: int) -> "SwitchSnmpClient":
-        # Try constructing an engine *in the executor* so we don’t block the loop.
-        def _probe() -> None:
-            _ = SnmpEngine()
+    async def async_initialize(self) -> None:
+        # fetch sys* values once
+        self.cache["sysDescr"] = await self._get_one(OID_sysDescr)
+        self.cache["sysName"] = await self._get_one(OID_sysName)
+        self.cache["sysUpTime"] = await self._get_one(OID_sysUpTime)
+        await self._walk_interfaces()
+        await self._walk_ipv4()
 
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, _probe)
-        except Exception as err:
-            raise SnmpDependencyError(f"pysnmp.hlapi import failed: {err}") from err
-        return cls(host, community, port)
+    async def async_poll(self) -> Dict[str, Any]:
+        # refresh dynamic parts
+        await self._walk_interfaces(dynamic_only=True)
+        await self._walk_ipv4()
+        return self.cache
 
-    async def async_close(self) -> None:
-        return
+    async def _get_one(self, oid: str) -> Optional[str]:
+        errorIndication, errorStatus, errorIndex, varBinds = await getCmd(
+            self.engine, self.community_data, self.target, self.context, ObjectType(ObjectIdentity(oid))
+        )
+        if errorIndication or errorStatus:
+            _LOGGER.debug("SNMP get error for %s: %s %s", oid, errorIndication, errorStatus)
+            return None
+        return str(varBinds[0][1])
 
-    # ---------- System sensors -------------------------------------------------
-    async def async_get_system_info(self) -> Dict[str, Optional[str]]:
-        """Return {'hostname','firmware','manuf_model','uptime'}; uptime in SECONDS."""
-        loop = asyncio.get_running_loop()
+    async def _walk(self, oid: str):
+        async for (errorIndication, errorStatus, errorIndex, varBinds) in nextCmd(
+            self.engine, self.community_data, self.target, self.context, ObjectType(ObjectIdentity(oid)),
+            lexicographicMode=False,
+        ):
+            if errorIndication or errorStatus:
+                _LOGGER.debug("SNMP walk error at %s: %s %s", oid, errorIndication, errorStatus)
+                break
+            for varBind in varBinds:
+                yield str(varBind[0]), varBind[1]
 
-        def _read() -> Dict[str, Optional[str]]:
-            sys_descr = _snmp_get(self._host, self._port, self._community, "1.3.6.1.2.1.1.1.0") or ""
-            sys_name = _snmp_get(self._host, self._port, self._community, "1.3.6.1.2.1.1.5.0") or ""
-            uptime_raw = _snmp_get(self._host, self._port, self._community, "1.3.6.1.2.1.1.3.0") or "0"
+    async def _walk_interfaces(self, dynamic_only: bool=False):
+        if not dynamic_only:
+            self.cache["ifTable"] = {}
+            # indices & base properties
+            async for oid, val in self._walk(OID_ifIndex):
+                idx = int(str(val))
+                self.cache["ifTable"][idx] = {"index": idx}
 
-            # Parse firmware & manufacturer/model (best-effort, generic)
-            manuf_model: Optional[str] = None
-            firmware: Optional[str] = None
-            parts = [p.strip() for p in sys_descr.split(",")]
-            if parts:
-                manuf_model = parts[0] or None
-                if len(parts) > 1 and any(ch.isdigit() for ch in parts[1]):
-                    firmware = parts[1]
+            async for oid, val in self._walk(OID_ifDescr):
+                idx = int(oid.split(".")[-1])
+                self.cache["ifTable"].setdefault(idx, {})["descr"] = str(val)
 
-            # sysUpTime is hundredths of seconds; convert to seconds
-            try:
-                ticks = int(uptime_raw.split(")")[0].split("(")[1]) if "(" in uptime_raw else int(uptime_raw)
-            except Exception:
-                ticks = 0
-            uptime_seconds = ticks // 100
+            async for oid, val in self._walk(OID_ifName):
+                idx = int(oid.split(".")[-1])
+                self.cache["ifTable"].setdefault(idx, {})["name"] = str(val)
 
-            return {
-                "hostname": sys_name or None,
-                "firmware": firmware,
-                "manuf_model": manuf_model,
-                "uptime": str(uptime_seconds),
-            }
+            async for oid, val in self._walk(OID_ifAlias):
+                idx = int(oid.split(".")[-1])
+                self.cache["ifTable"].setdefault(idx, {})["alias"] = str(val)
 
-        return await loop.run_in_executor(None, _read)
+        # dynamic
+        async for oid, val in self._walk(OID_ifAdminStatus):
+            idx = int(oid.split(".")[-1])
+            self.cache["ifTable"].setdefault(idx, {})["admin"] = int(val)
 
-    # ---------- Ports (incl. IPv4) --------------------------------------------
-    async def async_get_port_data(self) -> List[PortRow]:
-        """Return PortRow list; includes ip_cidr when interface has IPv4."""
-        loop = asyncio.get_running_loop()
+        async for oid, val in self._walk(OID_ifOperStatus):
+            idx = int(oid.split(".")[-1])
+            self.cache["ifTable"].setdefault(idx, {})["oper"] = int(val)
 
-        def _read() -> List[PortRow]:
-            # Base ifTable/ifXTable
-            ifdescr = _snmp_walk(self._host, self._port, self._community, "1.3.6.1.2.1.2.2.1.2")
-            ifalias = _snmp_walk(self._host, self._port, self._community, "1.3.6.1.2.1.31.1.1.1.18")
-            ifadmin = _snmp_walk(self._host, self._port, self._community, "1.3.6.1.2.1.2.2.1.7")
-            ifoper = _snmp_walk(self._host, self._port, self._community, "1.3.6.1.2.1.2.2.1.8")
-            iftype = _snmp_walk(self._host, self._port, self._community, "1.3.6.1.2.1.2.2.1.3")
+    async def _walk_ipv4(self):
+        ip_to_index = {}
+        ip_to_mask = {}
+        async for oid, val in self._walk(OID_ipAdEntAddr):
+            ip_to_index[str(val)] = None
+        async for oid, val in self._walk(OID_ipAdEntIfIndex):
+            # last 4 numbers form the IPv4
+            parts = oid.split(".")[-4:]
+            ip = ".".join(parts)
+            ip_to_index[ip] = int(val)
+        async for oid, val in self._walk(OID_ipAdEntNetMask):
+            parts = oid.split(".")[-4:]
+            ip = ".".join(parts)
+            ip_to_mask[ip] = str(val)
+        self.cache["ipIndex"] = ip_to_index
+        self.cache["ipMask"] = ip_to_mask
 
-            # Legacy IPv4 tables (widely present): ipAdEntIfIndex / ipAdEntNetMask
-            ip_ifindex_by_addr: Dict[str, int] = {}
-            try:
-                for oid, val in _snmp_walk(self._host, self._port, self._community, "1.3.6.1.2.1.4.20.1.2"):
-                    addr = ".".join(oid.split(".")[-4:])
-                    ip_ifindex_by_addr[addr] = int(val)
-            except Exception:
-                pass
+    async def set_alias(self, if_index: int, alias: str) -> bool:
+        errorIndication, errorStatus, errorIndex, varBinds = await setCmd(
+            self.engine, self.community_data, self.target, self.context,
+            ObjectType(ObjectIdentity(f"{OID_ifAlias}.{if_index}"), OctetString(alias)),
+        )
+        ok = not errorIndication and not errorStatus
+        if ok:
+            self.cache["ifTable"].setdefault(if_index, {})["alias"] = alias
+        else:
+            _LOGGER.warning("Failed to set alias: %s %s", errorIndication, errorStatus)
+        return ok
 
-            prefix_by_addr: Dict[str, int] = {}
-            try:
-                for oid, val in _snmp_walk(self._host, self._port, self._community, "1.3.6.1.2.1.4.20.1.3"):
-                    addr = ".".join(oid.split(".")[-4:])
-                    prefix_by_addr[addr] = _mask_to_prefix(val)
-            except Exception:
-                pass
+# helpers for config_flow
+async def test_connection(hass: HomeAssistant, host: str, community: str, port: int) -> bool:
+    client = SwitchSnmpClient(hass, host, community, port)
+    return (await client._get_one(OID_sysName)) is not None
 
-            # Build maps
-            def idx_from_oid(oid: str) -> int:
-                return int(oid.split(".")[-1])
-
-            alias_by_idx = {idx_from_oid(o): v for o, v in ifalias}
-            name_by_idx = {idx_from_oid(o): v for o, v in ifdescr}
-            admin_by_idx = {idx_from_oid(o): int(v) for o, v in ifadmin}
-            oper_by_idx = {idx_from_oid(o): int(v) for o, v in ifoper}
-            type_by_idx = {idx_from_oid(o): int(v) for o, v in iftype}
-
-            # Compute IPv4/CIDR per ifIndex
-            ipcidr_by_ifidx: Dict[int, str] = {}
-            for addr, ifidx in ip_ifindex_by_addr.items():
-                bits = prefix_by_addr.get(addr)
-                if bits is not None:
-                    ipcidr_by_ifidx[ifidx] = f"{addr}/{bits}"
-
-            rows: List[PortRow] = []
-            for idx, name in name_by_idx.items():
-                if idx == CPU_IFINDEX:
-                    continue  # skip CPU pseudo-interface
-
-                row = PortRow(
-                    index=idx,
-                    name=name,
-                    alias=alias_by_idx.get(idx, "") or "",
-                    admin=admin_by_idx.get(idx, 0),
-                    oper=oper_by_idx.get(idx, 0),
-                    iftype=type_by_idx.get(idx, 0),
-                    ip_cidr=ipcidr_by_ifidx.get(idx),
-                )
-
-                # Hide default/unconfigured Port-Channels (IEEE8023ad LAG) that have no alias & no IP
-                if row.iftype == IANA_IFTYPE_IEEE8023AD_LAG and not row.alias and not row.ip_cidr:
-                    continue
-
-                rows.append(row)
-
-            return rows
-
-        return await loop.run_in_executor(None, _read)
-
-    # ---------- Mutations ------------------------------------------------------
-    async def async_set_alias(self, ifindex: int, text: str) -> None:
-        """Set ifAlias."""
-        loop = asyncio.get_running_loop()
-
-        def _write() -> None:
-            _snmp_set_octetstring(
-                self._host,
-                self._port,
-                self._community,
-                f"1.3.6.1.2.1.31.1.1.1.18.{ifindex}",
-                text,
-            )
-
-        await loop.run_in_executor(None, _write)
-
-    async def async_set_admin_status(self, ifindex: int, enabled: bool) -> None:
-        """Set ifAdminStatus: 1=up, 2=down."""
-        loop = asyncio.get_running_loop()
-        value = 1 if enabled else 2
-
-        def _write() -> None:
-            _snmp_set_integer(
-                self._host, self._port, self._community, f"1.3.6.1.2.1.2.2.1.7.{ifindex}", value
-            )
-
-        await loop.run_in_executor(None, _write)
+async def get_sysname(hass: HomeAssistant, host: str, community: str, port: int) -> Optional[str]:
+    client = SwitchSnmpClient(hass, host, community, port)
+    return await client._get_one(OID_sysName)
