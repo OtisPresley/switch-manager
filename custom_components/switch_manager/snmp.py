@@ -201,119 +201,24 @@ class SwitchSnmpClient:
             self.cache["ifTable"].setdefault(idx, {})["oper"] = int(val)
 
     async def _async_walk_ipv4(self) -> None:
-        """
-        Populate ipIndex/ipMask. Use legacy IP-MIB (ipAdEnt*) if present; otherwise
-        fall back to modern IP-MIB/IP-FORWARD-MIB to compute /maskbits per ifIndex.
-        """
         ip_to_index: Dict[str, int | None] = {}
         ip_to_mask: Dict[str, str] = {}
 
-        # --- Legacy table first (preferred if present) ---
-        legacy_addrs = await self._async_walk(OID_ipAdEntAddr)
-        if legacy_addrs:
-            for _oid, val in legacy_addrs:
-                ip_to_index[str(val)] = None
+        for _oid, val in await self._async_walk(OID_ipAdEntAddr):
+            ip_to_index[str(val)] = None
 
-            for oid, val in await self._async_walk(OID_ipAdEntIfIndex):
-                parts = oid.split(".")[-4:]
-                ip = ".".join(parts)
-                ip_to_index[ip] = int(val)
+        for oid, val in await self._async_walk(OID_ipAdEntIfIndex):
+            parts = oid.split(".")[-4:]
+            ip = ".".join(parts)
+            ip_to_index[ip] = int(val)
 
-            for oid, val in await self._async_walk(OID_ipAdEntNetMask):
-                parts = oid.split(".")[-4:]
-                ip = ".".join(parts)
-                ip_to_mask[ip] = str(val)
+        for oid, val in await self._async_walk(OID_ipAdEntNetMask):
+            parts = oid.split(".")[-4:]
+            ip = ".".join(parts)
+            ip_to_mask[ip] = str(val)
 
-            self.cache["ipIndex"] = ip_to_index
-            self.cache["ipMask"] = ip_to_mask
-            return
-
-        # --- Fallback (modern tables) ONLY if legacy is empty ---
-        # Keep OIDs local to avoid touching const.py
-        OID_ipAddressAddr = "1.3.6.1.2.1.4.34.1.2"
-        OID_ipAddressIfIndex = "1.3.6.1.2.1.4.34.1.3"
-        OID_ipCidrRoutePrefixLength = "1.3.6.1.2.1.4.24.4.1.3"
-        OID_ipCidrRouteIfIndex = "1.3.6.1.2.1.4.24.4.1.7"
-
-        def _octets_to_ipv4(val: Any) -> Optional[str]:
-            try:
-                bs = bytes(val)
-            except Exception:
-                try:
-                    bs = val.asOctets()  # type: ignore[attr-defined]
-                except Exception:
-                    s = str(val)
-                    return s if s.count(".") == 3 else None
-            if len(bs) == 4:
-                return ".".join(str(b) for b in bs)
-            return None
-
-        def _bits_to_mask(bits: int) -> str:
-            if bits <= 0:
-                return "0.0.0.0"
-            if bits >= 32:
-                return "255.255.255.255"
-            mask = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF
-            return ".".join(str((mask >> s) & 0xFF) for s in (24, 16, 8, 0))
-
-        # 1) ipAddressIfIndex + ipAddressAddr -> ip -> ifIndex
-        addr_suffix_to_ip: Dict[str, str] = {}
-        for oid, val in await self._async_walk(OID_ipAddressAddr):
-            ip = _octets_to_ipv4(val)
-            if not ip:
-                continue  # skip IPv6 or malformed rows
-            suffix = oid[len(OID_ipAddressAddr) + 1 :]
-            addr_suffix_to_ip[suffix] = ip
-
-        for oid, val in await self._async_walk(OID_ipAddressIfIndex):
-            suffix = oid[len(OID_ipAddressIfIndex) + 1 :]
-            ip = addr_suffix_to_ip.get(suffix)
-            if not ip:
-                continue
-            try:
-                ip_to_index[ip] = int(val)
-            except Exception:
-                continue
-
-        # If no IPv4 addresses found, leave cache unchanged
-        if not ip_to_index:
-            return
-
-        # 2) ipCidrRoutePrefixLength + ipCidrRouteIfIndex -> choose most-specific prefix per ifIndex
-        most_specific_bits: Dict[int, int] = {}
-        bits_by_suffix: Dict[str, int] = {}
-
-        for oid, val in await self._async_walk(OID_ipCidrRoutePrefixLength):
-            suffix = oid[len(OID_ipCidrRoutePrefixLength) + 1 :]
-            try:
-                bits_by_suffix[suffix] = int(val)
-            except Exception:
-                continue
-
-        for oid, val in await self._async_walk(OID_ipCidrRouteIfIndex):
-            suffix = oid[len(OID_ipCidrRouteIfIndex) + 1 :]
-            try:
-                if_index = int(val)
-            except Exception:
-                continue
-            bits = bits_by_suffix.get(suffix)
-            if bits is None:
-                continue
-            prev = most_specific_bits.get(if_index, -1)
-            if bits > prev:
-                most_specific_bits[if_index] = bits
-
-        # 3) Assign dotted masks to each IP using the most specific bits for its ifIndex
-        for ip, if_index in ip_to_index.items():
-            bits = most_specific_bits.get(if_index)
-            if bits is not None:
-                ip_to_mask[ip] = _bits_to_mask(bits)
-
-        # Store results if we found any
-        if ip_to_index:
-            self.cache["ipIndex"] = ip_to_index
-        if ip_to_mask:
-            self.cache["ipMask"] = ip_to_mask
+        self.cache["ipIndex"] = ip_to_index
+        self.cache["ipMask"] = ip_to_mask
 
     async def set_alias(self, if_index: int, alias: str) -> bool:
         ok = await self.hass.async_add_executor_job(
