@@ -2,84 +2,31 @@ class SnmpSwitchManagerCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._hass = null;
     this._config = null;
-    this._needsAuto = false;
-    this._autoStarted = false;
+    this._hass = null;
   }
 
   setConfig(config) {
-    const rawPorts = config.ports ?? config.entities;
-
-    if (Array.isArray(rawPorts) && rawPorts.length > 0) {
-      const normalize = (entry) => {
-        if (typeof entry === "string") return { entity: entry };
-        if (!entry || !entry.entity)
-          throw new Error("Each port entry must include an entity property.");
-        return { ...entry };
-      };
-
-      const ports = rawPorts.map(normalize);
-
-      const markerSize = Number(config.marker_size ?? 26);
-      this._config = {
-        title: config.title,
-        image: config.image,
-        layout:
-          config.layout ||
-          (ports.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
-            ? "image"
-            : "grid"),
-        marker_size:
-          Number.isFinite(markerSize) && markerSize > 0 ? markerSize : 26,
-        ports,
-        device_id: config.device_id,
-        device_name: config.device_name,
-      };
-
-      this._needsAuto = false;
-      this._autoStarted = false;
-      this._render();
-      return;
-    }
-
+    // Accept either explicit ports or auto-discovery with optional device_name
+    // Supported keys:
+    //  - title: string
+    //  - image: /local/... (optional, for "image" layout)
+    //  - layout: "image" | "grid"  (default: "grid")
+    //  - ports: [entity_id, ...]   (optional explicit list)
+    //  - device_name: "SWITCH-BONUSCLOSET" (optional filter, substring match)
     this._config = {
-      title: config.title,
-      image: config.image,
-      layout: config.layout || "grid",
-      marker_size: Number(config.marker_size ?? 26),
-      ports: [],
-      device_id: config.device_id || null,
-      device_name: config.device_name || null,
+      title: config.title ?? "Switch",
+      image: config.image ?? null,
+      layout: (config.layout === "image" || config.layout === "grid") ? config.layout : "grid",
+      ports: Array.isArray(config.ports) ? config.ports : null,
+      device_name: config.device_name ?? null,
+      marker_size: Number.isFinite(config.marker_size) ? Number(config.marker_size) : 26,
     };
-
-    this._needsAuto = true;
-    this._autoStarted = false;
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
-
-    if (
-      this._hass &&
-      this._config &&
-      this._needsAuto &&
-      !this._autoStarted &&
-      (!this._config.ports || this._config.ports.length === 0)
-    ) {
-      this._autoStarted = true;
-      this._autoDiscoverPorts()
-        .then((list) => {
-          if (Array.isArray(list) && list.length) {
-            this._config.ports = list.map((id) => ({ entity: id }));
-            this._needsAuto = false;
-            this._render();
-          }
-        })
-        .catch(() => {});
-    }
-
     this._render();
   }
 
@@ -87,235 +34,211 @@ class SnmpSwitchManagerCard extends HTMLElement {
     return 4;
   }
 
-  // ---------- Auto-discovery helpers ----------
+  _discoverPorts() {
+    if (!this._hass) return [];
 
-  async _findDeviceIdByName(name) {
-    const devices = await this._hass.callWS({
-      type: "config/device_registry/list",
-    });
-    const dev = devices.find(
-      (d) => d.name === name || d.name_by_user === name
-    );
-    return dev ? dev.id : null;
-  }
-
-  async _autoDiscoverPorts() {
-    let deviceId = this._config.device_id || null;
-    if (!deviceId && this._config.device_name) {
-      deviceId = await this._findDeviceIdByName(this._config.device_name);
+    // If user supplied an explicit list, normalize/return that
+    if (this._config.ports && this._config.ports.length) {
+      return this._config.ports
+        .map((entity_id) => {
+          const st = this._hass.states[entity_id];
+          if (!st) return null;
+          return { entity_id, state: st };
+        })
+        .filter(Boolean);
     }
-    if (!deviceId) return [];
 
-    const entities = await this._hass.callWS({
-      type: "config/entity_registry/list",
-    });
+    // AUTO-DISCOVERY:
+    // Find switch.* entities that look like ports from THIS integration:
+    // Heuristic: must have attributes.Index (capital I) as created by snmp_switch_manager
+    // Also accept lowercase 'index' just in case.
+    const all = Object.entries(this._hass.states);
 
-    const ours = entities
-      .filter(
-        (e) =>
-          e.device_id === deviceId &&
-          e.platform === "snmp_switch_manager" && // <- renamed platform
-          e.domain === "switch"
-      )
-      .map((e) => e.entity_id);
+    const filtered = all
+      .filter(([eid, st]) => {
+        if (!eid.startsWith("switch.")) return false;
+        if (!st || !st.attributes) return false;
 
-    const withStates = ours
-      .map((id) => ({ id, st: this._hass.states[id] }))
-      .filter((x) => x.st);
+        const hasIndex =
+          st.attributes.Index !== undefined ||
+          st.attributes.index !== undefined;
 
-    const filtered = withStates.filter(({ st }) => {
-      const n = (st.attributes?.Name || "").toString().toUpperCase();
-      return n !== "CPU";
-    });
+        if (!hasIndex) return false;
 
+        // Optional device filter: substring match in friendly_name OR entity_id
+        if (this._config.device_name) {
+          const dn = String(this._config.device_name).toLowerCase();
+          const fn = String(st.attributes.friendly_name || "").toLowerCase();
+          const id = eid.toLowerCase();
+          if (!fn.includes(dn) && !id.includes(dn)) return false;
+        }
+        return true;
+      })
+      .map(([entity_id, state]) => ({ entity_id, state }));
+
+    // Sort by the integration's Name attribute when present, else by entity_id
     filtered.sort((a, b) => {
-      const ai = Number(a.st.attributes?.Index);
-      const bi = Number(b.st.attributes?.Index);
-      if (Number.isFinite(ai) && Number.isFinite(bi)) return ai - bi;
-      return a.id.localeCompare(b.id);
+      const na = (a.state.attributes.Name || a.entity_id).toString();
+      const nb = (b.state.attributes.Name || b.entity_id).toString();
+      return na.localeCompare(nb, undefined, { numeric: true, sensitivity: "base" });
     });
 
-    return filtered.map((x) => x.id);
+    return filtered;
   }
-
-  // ---------- Rendering ----------
 
   _render() {
-    if (!this.shadowRoot) return;
-    if (!this._config || !this._hass) {
-      this.shadowRoot.innerHTML = `<ha-card><div class="card"><div>Loading…</div></div></ha-card>`;
-      return;
-    }
+    if (!this.shadowRoot || !this._config || !this._hass) return;
 
-    const ports = (this._config.ports || [])
-      .map((p) => {
-        const id = p.entity;
-        const st = this._hass.states[id];
-        if (!st) return null;
-        return {
-          id,
-          st,
-          x: Number(p.x),
-          y: Number(p.y),
-        };
-      })
-      .filter(Boolean);
+    const ports = this._discoverPorts();
 
-    const title = this._config.title || "";
-    const layout = this._config.layout || "grid";
-    const markerSize = Number(this._config.marker_size ?? 26);
-    const image = this._config.image || null;
-
+    // Base styles
     const style = `
-      :host { display:block; }
-      ha-card { display:block; padding:0; }
-      .card { padding: 16px; box-sizing: border-box; position: relative; }
-      header { font-size: 20px; margin: 0 0 12px; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+      :host { display: block; }
+      ha-card { display: block; padding: 0; }
+      .header {
+        font-size: 20px;
+        font-weight: 600;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--divider-color);
+      }
+      .body { padding: 12px; }
+      .empty { color: var(--secondary-text-color); padding: 12px 16px; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 8px;
+      }
       .port {
-        border-radius: 12px; padding: 10px; background: var(--card-background-color);
+        border-radius: 10px;
+        padding: 10px;
         border: 1px solid var(--divider-color);
+        background: var(--card-background-color);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
       }
-      .port .name { font-weight: 600; margin-bottom: 8px; }
-      .kv { display:flex; justify-content: space-between; font-size: 12px; opacity: .8; }
-      .imgwrap { position: relative; }
-      .imgwrap img { display: block; width: 100%; border-radius: 12px; }
+      .port .name { font-weight: 600; }
+      .kv { font-size: 12px; color: var(--secondary-text-color); }
+      .image-wrap {
+        position: relative;
+        overflow: hidden;
+        border-radius: 12px;
+      }
+      .image-wrap img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
       .marker {
-        position:absolute; width:${markerSize}px; height:${markerSize}px;
-        border-radius:50%; border: 2px solid rgba(0,0,0,.2);
-        display:flex; align-items:center; justify-content:center;
-        transform: translate(-50%, -50%);
+        position: absolute;
+        width: ${this._config.marker_size}px;
+        height: ${this._config.marker_size}px;
+        border-radius: 50%;
         background: var(--primary-color);
-        color: #fff; font-size: 12px; cursor: pointer;
-        box-shadow: 0 2px 6px rgba(0,0,0,.25);
+        opacity: 0.85;
+        transform: translate(-50%, -50%);
+        cursor: pointer;
+        border: 2px solid rgba(0,0,0,.25);
       }
-      .marker.off { background: var(--disabled-text-color); }
-      .empty { opacity:.7; font-style: italic; }
-      button.toggle {
-        margin-top: 8px; width: 100%;
-        border: none; border-radius: 8px; padding: 8px 10px;
-        background: var(--primary-color); color: #fff; cursor: pointer;
-      }
-      button.toggle.off { background: var(--disabled-text-color); color: #222; }
     `;
 
-    const headerHtml = title ? `<header>${title}</header>` : "";
+    // Build content
+    const header = `<div class="header">${this._config.title}</div>`;
 
-    if (layout === "image" && image && ports.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))) {
-      const markers = ports
-        .map((p, idx) => {
-          const on = (p.st.state || "").toLowerCase() === "on";
-          const cls = on ? "marker" : "marker off";
-          const top = `${p.y}%`;
-          const left = `${p.x}%`;
-          const label = this._prettyName(p.st, p.id);
-          return `<div class="${cls}" title="${label}" style="top:${top};left:${left};" data-entity="${p.id}">${idx + 1}</div>`;
+    let body = "";
+    if (!ports.length) {
+      body = `<div class="empty">No ports to display yet.</div>`;
+    } else if (this._config.layout === "image" && this._config.image) {
+      // Image layout (markers don’t have coordinates yet—future enhancement)
+      body = `
+        <div class="body">
+          <div class="image-wrap">
+            <img src="${this._config.image}" alt="switch front" />
+            <!-- In a later version we can add coordinate-aware markers -->
+          </div>
+        </div>`;
+    } else {
+      // Grid layout
+      const grid = ports
+        .map(({ entity_id, state }) => {
+          const attrs = state.attributes || {};
+          const name = attrs.Name || entity_id.split(".")[1];
+          const admin = attrs.Admin ?? "Unknown";
+          const oper = attrs.Oper ?? "Unknown";
+          const ip = attrs.IP ?? attrs.Ip ?? ""; // supports your new IP attribute
+          const idx = attrs.Index ?? attrs.index ?? "";
+
+          // Toggle handler
+          const toggle = `
+            <mwc-button
+              outlined
+              data-entity="${entity_id}"
+              @click="${(ev) => this._handleToggle(ev)}"
+            >Toggle</mwc-button>
+          `;
+
+          return `
+            <div class="port">
+              <div class="name">${name}</div>
+              <div class="kv">Entity: ${entity_id}</div>
+              <div class="kv">Index: ${idx}</div>
+              <div class="kv">Admin: ${admin} | Oper: ${oper}</div>
+              ${ip ? `<div class="kv">IP: ${ip}</div>` : ``}
+              <ha-entity-toggle
+                .hass=${"__HASS__"}
+                .stateObj=${"__STATE__" + entity_id}
+              ></ha-entity-toggle>
+            </div>
+          `;
         })
         .join("");
 
-      this.shadowRoot.innerHTML = `
-        <ha-card>
-          <style>${style}</style>
-          <div class="card">
-            ${headerHtml}
-            <div class="imgwrap">
-              <img src="${image}">
-              ${markers}
-            </div>
-          </div>
-        </ha-card>
-      `;
-
-      this.shadowRoot.querySelectorAll(".marker").forEach((el) => {
-        el.addEventListener("click", (ev) => {
-          const ent = ev.currentTarget.getAttribute("data-entity");
-          if (ent) this._toggle(ent);
-        });
-      });
-
-      return;
+      body = `<div class="body"><div class="grid">${grid}</div></div>`;
     }
 
-    if (ports.length === 0) {
-      this.shadowRoot.innerHTML = `
-        <ha-card>
-          <style>${style}</style>
-          <div class="card">
-            ${headerHtml}
-            <div class="empty">No ports to display yet…</div>
-          </div>
-        </ha-card>
-      `;
-      return;
-    }
-
-    const portCards = ports
-      .map((p) => {
-        const st = p.st;
-        const on = (st.state || "").toLowerCase() === "on";
-        const cls = on ? "toggle" : "toggle off";
-        const name = this._prettyName(st, p.id);
-        const idx = st.attributes?.Index ?? "";
-        const admin = st.attributes?.Admin ?? "";
-        const oper = st.attributes?.Oper ?? "";
-        const alias = st.attributes?.Alias ?? "";
-        const ip = st.attributes?.IP ?? "";
-        return `
-          <div class="port">
-            <div class="name">${name}</div>
-            <div class="kv"><span>Index</span><span>${idx}</span></div>
-            <div class="kv"><span>Alias</span><span>${alias}</span></div>
-            <div class="kv"><span>Admin</span><span>${admin}</span></div>
-            <div class="kv"><span>Oper</span><span>${oper}</span></div>
-            ${ip ? `<div class="kv"><span>IP</span><span>${ip}</span></div>` : ``}
-            <button class="${cls}" data-entity="${p.id}">${on ? "Turn Off" : "Turn On"}</button>
-          </div>
-        `;
-      })
-      .join("");
-
+    // Compose DOM
     this.shadowRoot.innerHTML = `
       <ha-card>
         <style>${style}</style>
-        <div class="card">
-          ${headerHtml}
-          <div class="grid">
-            ${portCards}
-          </div>
-        </div>
+        ${header}
+        ${body}
       </ha-card>
     `;
 
-    this.shadowRoot.querySelectorAll("button.toggle").forEach((btn) => {
-      btn.addEventListener("click", (ev) => {
-        const ent = ev.currentTarget.getAttribute("data-entity");
-        if (ent) this._toggle(ent);
+    // Wire up toggles using HA’s built-in toggle for correct semantics
+    // Replace placeholders with actual objects (safe approach for HA cards)
+    ports.forEach(({ entity_id, state }) => {
+      const toggles = this.shadowRoot.querySelectorAll("ha-entity-toggle");
+      toggles.forEach((t) => {
+        if (!t.getAttribute("data-wired")) {
+          // Patch placeholders
+          if (t.outerHTML.includes("__STATE__" + entity_id)) {
+            t.hass = this._hass;
+            t.stateObj = state;
+            t.setAttribute("data-wired", "1");
+          }
+        }
       });
     });
   }
 
-  _prettyName(stateObj, entityId) {
-    const n = (stateObj.attributes?.Name || "").toString();
-    return n || entityId;
-  }
-
-  _toggle(entity_id) {
-    if (!this._hass) return;
-    const st = this._hass.states[entity_id];
-    const isOn = (st?.state || "").toLowerCase() === "on";
-    const svc = isOn ? "turn_off" : "turn_on";
-    this._hass.callService("switch", svc, { entity_id });
+  _handleToggle(ev) {
+    const entity_id = ev.currentTarget?.getAttribute("data-entity");
+    if (!entity_id || !this._hass) return;
+    const current = this._hass.states[entity_id];
+    const turnOn = (current?.state ?? "off") !== "on";
+    this._hass.callService("switch", turnOn ? "turn_on" : "turn_off", {
+      entity_id,
+    });
   }
 }
 
-// Register with the new tag name
 customElements.define("snmp-switch-manager-card", SnmpSwitchManagerCard);
 
-// Show in card picker
+// Card picker metadata
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "snmp-switch-manager-card",
-  name: "SNMP Switch Manager",
-  description: "Front view + port controls for the SNMP switch integration",
-  preview: true,
+  name: "SNMP Switch Manager Card",
+  description: "Auto-discovers SNMP Switch Manager ports and renders them.",
 });
