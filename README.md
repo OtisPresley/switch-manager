@@ -1,4 +1,4 @@
-# Switch Manager: Home Assistant Custom Integration
+# SNMP Switch Manager: Home Assistant Custom Integration
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-41BDF5?logo=home-assistant&logoColor=white&style=flat)](https://www.home-assistant.io/)
 [![HACS Badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz)
@@ -7,7 +7,7 @@
 [![HACS](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/hacs.yaml?branch=main&label=HACS)](https://github.com/OtisPresley/switch-manager/actions/workflows/hacs.yaml)
 [![CI](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/ci.yaml?branch=main&event=push)](https://github.com/OtisPresley/switch-manager/actions/workflows/ci.yaml)
 
-Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home Assistant](https://www.home-assistant.io/) with live status, descriptions, and administrative control. Pair it with the included Lovelace card for a rich dashboard visualisation of your hardware.
+SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home Assistant](https://www.home-assistant.io/) with live status, descriptions, and administrative control. Pair it with the included Lovelace card for a rich dashboard visualisation of your hardware.
 
 ---
 
