@@ -102,6 +102,12 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 
    Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
 
+<p float="left">
+  <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot1.png" alt="Screenshot 1" width="250"/>
+  <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot2.png" alt="Screenshot 2" width="250"/>
+  <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot3.png" alt="Screenshot 3" width="250"/>
+</p>
+
 ### Overlay a custom switch image
 
 Export the layout of your switch (for example, from Visio) as an image that lives under `/config/www`. The card can place colour-coded markers on top of that image by switching to the `image` layout and providing coordinates for every port:
