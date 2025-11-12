@@ -2,10 +2,10 @@
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-41BDF5?logo=home-assistant&logoColor=white&style=flat)](https://www.home-assistant.io/)
 [![HACS Badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz)
-[![License: MIT](https://raw.githubusercontent.com/otispresley/switch-manager/main/assets/license-mit.svg)](https://github.com/OtisPresley/switch-manager/blob/main/LICENSE)
-[![hassfest](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/hassfest.yaml?branch=main&label=hassfest)](https://github.com/OtisPresley/switch-manager/actions/workflows/hassfest.yaml)
-[![HACS](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/hacs.yaml?branch=main&label=HACS)](https://github.com/OtisPresley/switch-manager/actions/workflows/hacs.yaml)
-[![CI](https://img.shields.io/github/actions/workflow/status/OtisPresley/switch-manager/ci.yaml?branch=main&event=push)](https://github.com/OtisPresley/switch-manager/actions/workflows/ci.yaml)
+[![License: MIT](https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/license-mit.svg)](https://github.com/OtisPresley/snmp-switch-manager/blob/main/LICENSE)
+[![hassfest](https://img.shields.io/github/actions/workflow/status/OtisPresley/snmp-switch-manager/hassfest.yaml?branch=main&label=hassfest)](https://github.com/OtisPresley/snmp-switch-manager/actions/workflows/hassfest.yaml)
+[![HACS](https://img.shields.io/github/actions/workflow/status/OtisPresley/snmp-switch-manager/hacs.yaml?branch=main&label=HACS)](https://github.com/OtisPresley/snmp-switch-manager/actions/workflows/hacs.yaml)
+[![CI](https://img.shields.io/github/actions/workflow/status/OtisPresley/snmp-switch-manager/ci.yaml?branch=main&event=push)](https://github.com/OtisPresley/snmp-switch-manager/actions/workflows/ci.yaml)
 
 SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home Assistant](https://www.home-assistant.io/) with live status, descriptions, and administrative control. Pair it with the included Lovelace card for a rich dashboard visualisation of your hardware.
 
@@ -50,22 +50,22 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 
 ### Install through HACS (recommended)
 
-1. In Home Assistant, open **HACS → Integrations → ⋮ → Custom repositories** and add `https://github.com/OtisPresley/switch-manager` as an Integration repository.
+1. In Home Assistant, open **HACS → Integrations → ⋮ → Custom repositories** and add `https://github.com/OtisPresley/snmp-switch-manager` as an Integration repository.
 2. Search HACS for **Switch Manager** and click **Download**.
 3. Restart Home Assistant when prompted.
 
 ### Manual installation
 
-1. Download the latest release ZIP from the [GitHub releases page](https://github.com/OtisPresley/switch-manager/releases).
-2. Copy `custom_components/switch_manager` into your Home Assistant `custom_components` directory.
-3. Copy `www/community/switch-manager-card` into `www/community` (create the path if necessary).
+1. Download the latest release ZIP from the [GitHub releases page](https://github.com/OtisPresley/snmp-switch-manager/releases).
+2. Copy `custom_components/snmp-switch_manager` into your Home Assistant `custom_components` directory.
+3. Copy `www/community/snmp-switch-manager-card` into `www/community` (create the path if necessary).
 4. Restart Home Assistant.
 
 ---
 
 ## Configuration
 
-1. Go to **Settings → Devices & services → Add integration** and search for **Switch Manager**.
+1. Go to **Settings → Devices & services → Add integration** and search for **SNMP Switch Manager**.
 2. Enter the switch hostname/IP address, the SNMP community string, and optionally a friendly name or non-standard SNMP port.
 3. Once the flow completes, Home Assistant adds one `switch` entity per discovered interface. Entities follow the pattern `switch.<device_name>_port_<index>`.
 
@@ -76,19 +76,16 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 1. Add the card JavaScript as a resource under **Settings → Dashboards → Resources**:
 
    ```yaml
-   url: /hacsfiles/switch-manager-card/switch-manager-card.js
+   url: /hacsfiles/switch-manager-card/snmp-switch-manager-card.js
    type: module
    ```
 
 2. Place the card on any dashboard:
 
    ```yaml
-   type: custom:switch-manager-card
+   type: custom:snmp-switch-manager-card
    title: Core Switch
-   entities:
-     - switch.core_switch_port_1
-     - switch.core_switch_port_2
-     - switch.core_switch_port_3
+   device_name: Switch
    ```
 
    Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
@@ -98,7 +95,7 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 Export the layout of your switch (for example, from Visio) as an image that lives under `/config/www`. The card can place colour-coded markers on top of that image by switching to the `image` layout and providing coordinates for every port:
 
 ```yaml
-type: custom:switch-manager-card
+type: custom:snmp-switch-manager-card
 title: Bonus Closet Switch
 image: /local/images/bonus-closet-switch.png
 layout: image
@@ -123,10 +120,10 @@ Markers adopt the port’s administrative status—green for enabled, red for di
 
 ### Update a port description
 
-Use the `switch_manager.set_port_description` service to change an interface alias:
+Use the `snmp_switch_manager.set_port_description` service to change an interface alias:
 
 ```yaml
-service: switch_manager.set_port_description
+service: snmp_switch_manager.set_port_description
 data:
   entity_id: switch.core_switch_port_5
   description: Uplink to router
@@ -150,7 +147,7 @@ The state of each port entity reflects the interface's administrative status. Tu
 
 ## Support
 
-- Open an issue on the [GitHub tracker](https://github.com/OtisPresley/switch-manager/issues) if you run into problems or have feature requests.
+- Open an issue on the [GitHub tracker](https://github.com/OtisPresley/snmp-switch-manager/issues) if you run into problems or have feature requests.
 - Contributions and feedback are welcome!
 
 If you find this integration useful and want to support development, you can:
