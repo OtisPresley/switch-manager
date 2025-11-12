@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-DOMAIN = "switch_manager"
+DOMAIN = "snmp_switch_manager"
 
 CONF_HOST = "host"
 CONF_PORT = "port"
