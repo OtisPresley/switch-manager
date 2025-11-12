@@ -121,7 +121,7 @@ Use the `snmp_switch_manager.set_port_description` service to change an interfac
 ```yaml
 service: snmp_switch_manager.set_port_description
 data:
-  entity_id: switch.core_switch_port_5
+  entity_id: switch.gi1_0_5
   description: Uplink to router
 ```
 
