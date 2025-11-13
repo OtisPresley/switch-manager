@@ -156,6 +156,8 @@ The state of each port entity reflects the interface's administrative status. Tu
 
 ## Support
 
+If your switch does not display correctly, then the integration will need to have specific support added for it. Please open an issue with an text file attachment with the results of an `snmpwalk` command against your switch with a **RW SNMPv2c community string** and any necessary screenshots. Also describe what is incorrect and what it should look like.
+
 - Open an issue on the [GitHub tracker](https://github.com/OtisPresley/snmp-switch-manager/issues) if you run into problems or have feature requests.
 - Contributions and feedback are welcome!
 
