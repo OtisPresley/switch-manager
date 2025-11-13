@@ -11,3 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Created the initial integration
 
 ---
+
+## [2.0.1] - 2025-11-13
+### Added
+- 🔍 Automatic discovery of port count, speed, description, and operational status via SNMP v2c
+- 🔄 Background polling that keeps Home Assistant entities in sync with switch updates
+- 🎚️ One `switch` entity per interface for toggling administrative state (up/down)
+- 🏷️ Service for updating the interface alias (`ifAlias`) without leaving Home Assistant
+- 🖼️ Lovelace card that mirrors the switch layout with colour-coded port status and quick actions
+
+---
