@@ -43,7 +43,7 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 - Home Assistant 2025.11.2 or newer (recommended)
 - A switch reachable via SNMP v2c (UDP/161) with read access to interface tables and write access to `ifAlias`
 - The SNMP community string that grants the required permissions
-- pysnmp 4.x (the integration installs it automatically when needed)
+- pysnmp 7.x (the integration installs it automatically when needed)
 
 ---
 
