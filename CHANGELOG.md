@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.2.0] - 2025-11-13
+## [0.2.0] - 2025-11-20
 ### Fixed
 - 🚧 Refactored to work with pysnmp 7.1.24 to work with HA Core 7.1.24
 
