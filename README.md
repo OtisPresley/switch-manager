@@ -124,6 +124,7 @@ After installation, restart Home Assistant and add the integration:
    - `title` sets the text displayed at the tip of the card.
    - `view` sets the style that the card uses. `list` lists each port in a tile. `panel` show a representation of the front of a switch.
    - `ports_per_row` sets the number of ports to show in each row on the card when in panel view.
+   - `panel width` The total width of the card in pixels when in panel view.
    - `info_position` displays the Diagnostics and Virtual Interfaces either `above` the phisical ports or `below` them.
    - `label_size` determines the font size used for the port labels when in panel view.
    - `anchor_entity` is any entity in your switch so it knows which ports and diagnostics to display.
