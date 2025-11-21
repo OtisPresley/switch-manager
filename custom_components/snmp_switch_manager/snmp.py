@@ -296,11 +296,37 @@ class SwitchSnmpClient:
         ip_index: Dict[str, int] = {}
         ip_mask: Dict[str, str] = {}  # primarily from (1) and (4)
 
+        def _normalize_ipv4(val: Any) -> str:
+            """Convert SNMP IPv4 values to dotted-quad strings.
+
+            Some vendors (e.g., Cisco CBS series) return ipAdEntAddr/ipAdEntNetMask
+            as raw octets instead of a printable IpAddress. This helper keeps existing
+            behavior for vendors that already return dotted strings."""
+            s = str(val)
+            parts = s.split(".")
+            if len(parts) == 4 and all(p.isdigit() for p in parts):
+                return s
+
+            # Try to interpret as 4 raw octets
+            b: Optional[bytes] = None
+            try:
+                b = bytes(val)  # pysnmp types often support __bytes__
+            except Exception:
+                try:
+                    b = val.asOctets()  # type: ignore[attr-defined]
+                except Exception:
+                    b = None
+
+            if b and len(b) == 4:
+                return ".".join(str(x) for x in b)
+
+            return s
+
         # ---- (1) Legacy table: ipAdEnt* ----
         legacy_addrs = await self._async_walk(OID_ipAdEntAddr)
         if legacy_addrs:
             for _oid, val in legacy_addrs:
-                ip_index[str(val)] = None  # type: ignore[assignment]
+                ip_index[_normalize_ipv4(val)] = None  # type: ignore[assignment]
 
             for oid, val in await self._async_walk(OID_ipAdEntIfIndex):
                 parts = oid.split(".")[-4:]
@@ -313,7 +339,7 @@ class SwitchSnmpClient:
             for oid, val in await self._async_walk(OID_ipAdEntNetMask):
                 parts = oid.split(".")[-4:]
                 ip = ".".join(parts)
-                ip_mask[ip] = str(val)
+                ip_mask[ip] = _normalize_ipv4(val)
 
         # ---- (2) IP-MIB ipAddressIfIndex: parse instance suffix (1.4.a.b.c.d)
         try:
