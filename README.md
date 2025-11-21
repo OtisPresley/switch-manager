@@ -83,7 +83,7 @@ After installation, restart Home Assistant and add the integration:
 
 ## Lovelace card
 
-1. Download the `snmp-switch-manager-card.js` and  `snmp-switch-manager-card-editor.js` files and place them in `www/community/snmp-switch-manager-card/` in Home Assistant.
+1. Download the `snmp-switch-manager-card.js` and  `snmp-switch-manager-card-editor.js` files from the [SNMP Switch Manager Card repository](https://github.com/OtisPresley/snmp-switch-manager-card) and place them in `www/community/snmp-switch-manager-card/` in Home Assistant.
 
 2. Add the card and editor JavaScript as a resource under **Settings → Dashboards → Resources**:
 
